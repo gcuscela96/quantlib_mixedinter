@@ -1,0 +1,80 @@
+name: Build Windows QuantLib wheel (frontier fork)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout this repo (contains the two .patch files)
+        uses: actions/checkout@v4
+        with:
+          path: patches-repo
+
+      - name: Checkout QuantLib
+        uses: actions/checkout@v4
+        with:
+          repository: lballabio/QuantLib
+          path: QuantLib
+
+      - name: Apply QuantLib patch
+        working-directory: QuantLib
+        run: git apply ..\patches-repo\QuantLib.patch
+
+      - name: Checkout QuantLib-SWIG
+        uses: actions/checkout@v4
+        with:
+          repository: lballabio/QuantLib-SWIG
+          path: QuantLib-SWIG
+
+      - name: Apply QuantLib-SWIG patch
+        working-directory: QuantLib-SWIG
+        run: git apply ..\patches-repo\QuantLib-SWIG.patch
+
+      - name: Install Boost (prebuilt, via Chocolatey)
+        run: choco install boost-msvc-14.3 -y --no-progress
+
+      - name: Install SWIG (via Chocolatey)
+        run: choco install swig -y --no-progress
+
+      - name: Locate Boost install directory
+        shell: pwsh
+        run: |
+          $dir = Get-ChildItem "C:\local" -Directory | Where-Object { $_.Name -like "boost_*" } | Select-Object -First 1
+          if (-not $dir) { throw "Boost install directory not found under C:\local" }
+          echo "BOOST_ROOT=$($dir.FullName)" >> $env:GITHUB_ENV
+
+      - name: Setup Python 3.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9.9"
+
+      - name: Setup MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build QuantLib.lib
+        working-directory: QuantLib
+        shell: cmd
+        run: |
+          set INCLUDE=%INCLUDE%;%BOOST_ROOT%
+          msbuild QuantLib.sln /p:Configuration=Release /p:Platform=x64 /m
+
+      - name: Build Python wheel
+        working-directory: QuantLib-SWIG\Python
+        shell: cmd
+        run: |
+          set QL_DIR=%GITHUB_WORKSPACE%\QuantLib
+          set INCLUDE=%INCLUDE%;%BOOST_ROOT%
+          swig.cmd
+          python -m pip install build
+          python -m build --wheel
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: quantlib-frontier-windows-wheel
+          path: QuantLib-SWIG/Python/dist/*.whl
