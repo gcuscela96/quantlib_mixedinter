@@ -67,6 +67,26 @@ jobs:
           $env:INCLUDE = "$env:INCLUDE;$boostRoot"
           Write-Host "INCLUDE is now: $env:INCLUDE"
 
+          # MSBuild's C++ build tasks do NOT reliably fall back to the
+          # process INCLUDE environment variable when compiling through a
+          # .vcxproj -- they build the include list mostly from project
+          # properties. So we also inject the Boost path directly via a
+          # Directory.Build.props file, which MSBuild auto-imports from
+          # the project's own directory and which QuantLib.vcxproj's
+          # "%(AdditionalIncludeDirectories)" metadata correctly inherits.
+          @"
+<Project>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$boostRoot;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemDefinitionGroup>
+</Project>
+"@ | Out-File -FilePath "Directory.Build.props" -Encoding utf8
+
+          Write-Host "Directory.Build.props written:"
+          Get-Content "Directory.Build.props"
+
           & msbuild QuantLib.sln /p:Configuration=Release /p:Platform=x64 /m
           if ($LASTEXITCODE -ne 0) { throw "msbuild failed with exit code $LASTEXITCODE" }
 
