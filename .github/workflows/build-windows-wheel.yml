@@ -106,7 +106,7 @@ jobs:
           Write-Host "QL_DIR is: $env:QL_DIR"
           Write-Host "INCLUDE is now: $env:INCLUDE"
 
-          & swig.cmd
+          & .\swig.cmd
           if ($LASTEXITCODE -ne 0) { throw "swig failed with exit code $LASTEXITCODE" }
 
           python -m pip install build
