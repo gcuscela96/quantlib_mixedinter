@@ -74,15 +74,18 @@ jobs:
           # Directory.Build.props file, which MSBuild auto-imports from
           # the project's own directory and which QuantLib.vcxproj's
           # "%(AdditionalIncludeDirectories)" metadata correctly inherits.
-          @"
-<Project>
-  <ItemDefinitionGroup>
-    <ClCompile>
-      <AdditionalIncludeDirectories>$boostRoot;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-    </ClCompile>
-  </ItemDefinitionGroup>
-</Project>
-"@ | Out-File -FilePath "Directory.Build.props" -Encoding utf8
+          # (built as a single-line join instead of a here-string, so this
+          # stays a plain, consistently indented YAML block scalar)
+          $propsLines = @(
+            "<Project>",
+            "  <ItemDefinitionGroup>",
+            "    <ClCompile>",
+            "      <AdditionalIncludeDirectories>$boostRoot;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>",
+            "    </ClCompile>",
+            "  </ItemDefinitionGroup>",
+            "</Project>"
+          )
+          $propsLines -join "`n" | Out-File -FilePath "Directory.Build.props" -Encoding utf8
 
           Write-Host "Directory.Build.props written:"
           Get-Content "Directory.Build.props"
