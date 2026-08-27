@@ -33,18 +33,23 @@ jobs:
         working-directory: QuantLib-SWIG
         run: git apply ..\patches-repo\QuantLib-SWIG.patch
 
-      - name: Install Boost (prebuilt, via Chocolatey)
-        run: choco install boost-msvc-14.3 -y --no-progress
+      - name: Download and extract Boost headers (official archive)
+        shell: pwsh
+        run: |
+          $ver = "1.84.0"
+          $verUnderscore = $ver -replace '\.', '_'
+          $url = "https://archives.boost.org/release/$ver/source/boost_$verUnderscore.zip"
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\boost.zip"
+          Expand-Archive -Path "$env:RUNNER_TEMP\boost.zip" -DestinationPath "C:\boost"
+          $root = "C:\boost\boost_$verUnderscore"
+          if (-not (Test-Path "$root\boost\config.hpp")) {
+            throw "boost/config.hpp not found under $root -- archive layout unexpected"
+          }
+          echo "BOOST_ROOT=$root" >> $env:GITHUB_ENV
 
       - name: Install SWIG (via Chocolatey)
         run: choco install swig -y --no-progress
-
-      - name: Locate Boost install directory
-        shell: pwsh
-        run: |
-          $dir = Get-ChildItem "C:\local" -Directory | Where-Object { $_.Name -like "boost_*" } | Select-Object -First 1
-          if (-not $dir) { throw "Boost install directory not found under C:\local" }
-          echo "BOOST_ROOT=$($dir.FullName)" >> $env:GITHUB_ENV
 
       - name: Setup Python 3.9
         uses: actions/setup-python@v5
