@@ -33,21 +33,6 @@ jobs:
         working-directory: QuantLib-SWIG
         run: git apply ..\patches-repo\QuantLib-SWIG.patch
 
-      - name: Download and extract Boost headers (official archive)
-        shell: pwsh
-        run: |
-          $ver = "1.84.0"
-          $verUnderscore = $ver -replace '\.', '_'
-          $url = "https://archives.boost.org/release/$ver/source/boost_$verUnderscore.zip"
-          Write-Host "Downloading $url"
-          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\boost.zip"
-          Expand-Archive -Path "$env:RUNNER_TEMP\boost.zip" -DestinationPath "C:\boost"
-          $root = "C:\boost\boost_$verUnderscore"
-          if (-not (Test-Path "$root\boost\config.hpp")) {
-            throw "boost/config.hpp not found under $root -- archive layout unexpected"
-          }
-          echo "BOOST_ROOT=$root" >> $env:GITHUB_ENV
-
       - name: Install SWIG (via Chocolatey)
         run: choco install swig -y --no-progress
 
@@ -61,20 +46,46 @@ jobs:
         with:
           arch: x64
 
-      - name: Build QuantLib.lib
+      - name: Download Boost, extract, and build QuantLib.lib
         working-directory: QuantLib
-        shell: cmd
+        shell: pwsh
         run: |
-          set INCLUDE=%INCLUDE%;%BOOST_ROOT%
-          msbuild QuantLib.sln /p:Configuration=Release /p:Platform=x64 /m
+          $ver = "1.84.0"
+          $verUnderscore = $ver -replace '\.', '_'
+          $boostRoot = "C:\boost\boost_$verUnderscore"
+          $url = "https://archives.boost.org/release/$ver/source/boost_$verUnderscore.zip"
+
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\boost.zip"
+          Expand-Archive -Path "$env:RUNNER_TEMP\boost.zip" -DestinationPath "C:\boost"
+
+          if (-not (Test-Path "$boostRoot\boost\config.hpp")) {
+            throw "boost/config.hpp not found under $boostRoot -- archive layout unexpected"
+          }
+          Write-Host "Boost headers OK at $boostRoot"
+
+          $env:INCLUDE = "$env:INCLUDE;$boostRoot"
+          Write-Host "INCLUDE is now: $env:INCLUDE"
+
+          & msbuild QuantLib.sln /p:Configuration=Release /p:Platform=x64 /m
+          if ($LASTEXITCODE -ne 0) { throw "msbuild failed with exit code $LASTEXITCODE" }
+
+          # save the boost root for the next step (same job, so GITHUB_ENV works
+          # fine here -- this step itself is proof the value round-trips)
+          echo "BOOST_ROOT=$boostRoot" >> $env:GITHUB_ENV
 
       - name: Build Python wheel
         working-directory: QuantLib-SWIG\Python
-        shell: cmd
+        shell: pwsh
         run: |
-          set QL_DIR=%GITHUB_WORKSPACE%\QuantLib
-          set INCLUDE=%INCLUDE%;%BOOST_ROOT%
-          swig.cmd
+          $env:QL_DIR = "$env:GITHUB_WORKSPACE\QuantLib"
+          $env:INCLUDE = "$env:INCLUDE;$env:BOOST_ROOT"
+          Write-Host "QL_DIR is: $env:QL_DIR"
+          Write-Host "INCLUDE is now: $env:INCLUDE"
+
+          & swig.cmd
+          if ($LASTEXITCODE -ne 0) { throw "swig failed with exit code $LASTEXITCODE" }
+
           python -m pip install build
           python -m build --wheel
 
