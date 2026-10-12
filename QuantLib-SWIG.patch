@@ -75,10 +75,10 @@ index 615d8fc..0adc610 100644
  using QuantLib::RichardsonExtrapolation;
  %}
 diff --git a/SWIG/piecewiseyieldcurve.i b/SWIG/piecewiseyieldcurve.i
-index c51f218..1e53476 100644
+index a7121b6..e18bd10 100644
 --- a/SWIG/piecewiseyieldcurve.i
 +++ b/SWIG/piecewiseyieldcurve.i
-@@ -178,6 +178,11 @@ export_piecewise_curve(PiecewiseParabolicCubicZero,ZeroYield,ParabolicCubic);
+@@ -180,6 +180,11 @@ export_piecewise_curve(PiecewiseParabolicCubicZero,ZeroYield,ParabolicCubic);
  export_piecewise_curve(PiecewiseMonotonicParabolicCubicZero,ZeroYield,MonotonicParabolicCubic);
  export_piecewise_curve(PiecewiseLogParabolicCubicDiscount,Discount,LogParabolicCubic);
  export_piecewise_curve(PiecewiseMonotonicLogParabolicCubicDiscount,Discount,MonotonicLogParabolicCubic);
@@ -91,7 +91,7 @@ index c51f218..1e53476 100644
  
  // global bootstrapper
 diff --git a/SWIG/ratehelpers.i b/SWIG/ratehelpers.i
-index f732ac2..4b110a4 100644
+index b95a232..841e21c 100644
 --- a/SWIG/ratehelpers.i
 +++ b/SWIG/ratehelpers.i
 @@ -51,6 +51,8 @@ using QuantLib::ConstNotionalCrossCurrencyBasisSwapRateHelper;
@@ -101,9 +101,9 @@ index f732ac2..4b110a4 100644
 +using QuantLib::OvernightIborBasisSwapRateHelperCustomPillar;
 +using QuantLib::OvernightIborBasisSwapRateHelperForwardStarting;
  using QuantLib::OvernightOvernightBasisSwapRateHelper;
+ using QuantLib::OvernightIndexedFundingRateHelper;
  using QuantLib::MultipleResetsSwapRateHelper;
- %}
-@@ -732,6 +734,72 @@ class OvernightIborBasisSwapRateHelper : public RateHelper {
+@@ -754,6 +756,87 @@ class OvernightIborBasisSwapRateHelper : public RateHelper {
      ext::shared_ptr<Swap> swap();
  };
  
@@ -149,7 +149,17 @@ index f732ac2..4b110a4 100644
 +    // forward-starting overnight-vs-ibor basis swap: startDate and endDate
 +    // are explicit, fixed dates (e.g. two IMM/ECB dates) rather than being
 +    // derived from the evaluation date via settlementDays + tenor; the
-+    // bootstrap pillar defaults to endDate, or to customPillarDate if given
++    // bootstrap pillar defaults to endDate, or to customPillarDate if given.
++    // customPaymentDate additionally supports an "early payment" stub: the
++    // overnight/ibor legs still accrue/fix over their real startDate-to-
++    // endDate period, but both coupons are paid on customPaymentDate
++    // instead (only supported for a single-period/stub schedule; and, when
++    // customPillarDate is not given, the pillar then defaults to
++    // customPaymentDate instead of endDate). overnightDayCounter/
++    // iborDayCounter let each leg use an accrual day counter different
++    // from its index's native one. overnightFlatRatePayment/
++    // iborFlatRatePayment switch a leg's cash flow to amount = rate() *
++    // nominal() with NO day-count accrual-period scaling at all.
 +    // -- see ql/termstructures/yield/forwardstartingbasisswaphelper.hpp
 +    OvernightIborBasisSwapRateHelperForwardStarting(
 +                                     const Date& startDate,
@@ -169,7 +179,12 @@ index f732ac2..4b110a4 100644
 +                                     RateAveraging::Type averagingMethod = RateAveraging::Compound,
 +                                     bool telescopicValueDates = false,
 +                                     bool basisOnIborLeg = false,
-+                                     const Date& customPillarDate = Date());
++                                     const Date& customPillarDate = Date(),
++                                     const Date& customPaymentDate = Date(),
++                                     DayCounter overnightDayCounter = DayCounter(),
++                                     DayCounter iborDayCounter = DayCounter(),
++                                     bool overnightFlatRatePayment = false,
++                                     bool iborFlatRatePayment = false);
 +    ext::shared_ptr<Swap> swap();
 +};
 +

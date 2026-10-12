@@ -327,10 +327,21 @@ index 0000000..7b3b780
 +pilastro e l'altro, e sono entrambe continue (C0) alla frontiera fino
 +alla decima cifra decimale.
 diff --git a/ql/CMakeLists.txt b/ql/CMakeLists.txt
-index 6296688..c1378bf 100644
+index 436612a..22004d7 100644
 --- a/ql/CMakeLists.txt
 +++ b/ql/CMakeLists.txt
-@@ -1509,6 +1509,7 @@ set(QL_HEADERS
+@@ -1007,8 +1007,10 @@ set(QL_HEADERS
+     cashflows/digitaliborcoupon.hpp
+     cashflows/dividend.hpp
+     cashflows/duration.hpp
++    cashflows/earlypaymentcoupon.hpp
+     cashflows/equitycashflow.hpp
+     cashflows/fixedratecoupon.hpp
++    cashflows/flatratecoupon.hpp
+     cashflows/floatingratecoupon.hpp
+     cashflows/iborcoupon.hpp
+     cashflows/indexedcashflow.hpp
+@@ -1514,6 +1516,7 @@ set(QL_HEADERS
      math/interpolations/flatextrapolation.hpp
      math/interpolations/flatextrapolation2d.hpp
      math/interpolations/forwardflatinterpolation.hpp
@@ -338,7 +349,7 @@ index 6296688..c1378bf 100644
      math/interpolations/interpolation2d.hpp
      math/interpolations/kernelinterpolation.hpp
      math/interpolations/kernelinterpolation2d.hpp
-@@ -2205,6 +2206,7 @@ set(QL_HEADERS
+@@ -2210,6 +2213,7 @@ set(QL_HEADERS
      termstructures/yield/flatforward.hpp
      termstructures/yield/forwardcurve.hpp
      termstructures/yield/forwardspreadedtermstructure.hpp
@@ -346,7 +357,7 @@ index 6296688..c1378bf 100644
      termstructures/yield/forwardstructure.hpp
      termstructures/yield/impliedtermstructure.hpp
      termstructures/yield/interpolatedsimplezerocurve.hpp
-@@ -2216,6 +2218,7 @@ set(QL_HEADERS
+@@ -2221,6 +2225,7 @@ set(QL_HEADERS
      termstructures/yield/piecewiseyieldcurve.hpp
      termstructures/yield/piecewisezerospreadedtermstructure.hpp
      termstructures/yield/quantotermstructure.hpp
@@ -354,6 +365,259 @@ index 6296688..c1378bf 100644
      termstructures/yield/ratehelpers.hpp
      termstructures/yield/spreadbootstraptraits.hpp
      termstructures/yield/spreaddiscountcurve.hpp
+diff --git a/ql/cashflows/Makefile.am b/ql/cashflows/Makefile.am
+index b35ad9d..3055881 100644
+--- a/ql/cashflows/Makefile.am
++++ b/ql/cashflows/Makefile.am
+@@ -21,8 +21,10 @@ this_include_HEADERS = \
+     digitaliborcoupon.hpp \
+     dividend.hpp \
+     duration.hpp \
++    earlypaymentcoupon.hpp \
+     equitycashflow.hpp \
+     fixedratecoupon.hpp \
++    flatratecoupon.hpp \
+     floatingratecoupon.hpp \
+     iborcoupon.hpp \
+     indexedcashflow.hpp \
+diff --git a/ql/cashflows/all.hpp b/ql/cashflows/all.hpp
+index 124b93b..68b529f 100644
+--- a/ql/cashflows/all.hpp
++++ b/ql/cashflows/all.hpp
+@@ -18,8 +18,10 @@
+ #include <ql/cashflows/digitaliborcoupon.hpp>
+ #include <ql/cashflows/dividend.hpp>
+ #include <ql/cashflows/duration.hpp>
++#include <ql/cashflows/earlypaymentcoupon.hpp>
+ #include <ql/cashflows/equitycashflow.hpp>
+ #include <ql/cashflows/fixedratecoupon.hpp>
++#include <ql/cashflows/flatratecoupon.hpp>
+ #include <ql/cashflows/floatingratecoupon.hpp>
+ #include <ql/cashflows/iborcoupon.hpp>
+ #include <ql/cashflows/indexedcashflow.hpp>
+diff --git a/ql/cashflows/earlypaymentcoupon.hpp b/ql/cashflows/earlypaymentcoupon.hpp
+new file mode 100644
+index 0000000..0c44855
+--- /dev/null
++++ b/ql/cashflows/earlypaymentcoupon.hpp
+@@ -0,0 +1,109 @@
++/* -*- mode: c++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
++
++/*
++ This file is part of a fork of QuantLib intended to add support for
++ "early payment" coupons: a coupon whose accrual/fixing period is
++ unchanged but whose cash flow is paid (and discounted) on a date
++ earlier than its natural accrual end date.
++
++ QuantLib is free software: you can redistribute it and/or modify it
++ under the terms of the QuantLib license.  You should have received a
++ copy of the license along with this program; if not, please email
++ <quantlib-dev@lists.sf.net>. The license is also available online at
++ <https://www.quantlib.org/license.shtml>.
++
++ This program is distributed in the hope that it will be useful, but WITHOUT
++ ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
++ FOR A PARTICULAR PURPOSE.  See the license for more details.
++*/
++
++/*! \file earlypaymentcoupon.hpp
++    \brief coupon wrapper that redates an existing coupon's cash flow to
++           an earlier payment date, without touching its accrual/fixing
++*/
++
++#ifndef quantlib_early_payment_coupon_hpp
++#define quantlib_early_payment_coupon_hpp
++
++#include <ql/cashflows/coupon.hpp>
++#include <utility>
++
++namespace QuantLib {
++
++    //! Coupon that pays an existing coupon's cash flow on an earlier date
++    /*! Several concrete coupon classes (notably OvernightIndexedCoupon)
++        structurally enforce \c paymentDate \>= \c accrualEndDate in their
++        constructor, because in the ordinary case a coupon cannot be paid
++        before the period it accrues over has ended. Some real-world
++        instruments do need exactly that, though: the accrual/fixing
++        period genuinely runs to its natural end date, but the cash flow
++        is contractually paid earlier (e.g. a swap leg whose payment is
++        pulled forward to an ECB/IMM date to avoid overlapping with the
++        next leg on a curve, while the rate itself still fixes/compounds
++        over the full real period).
++
++        EarlyPaymentCoupon represents this by wrapping an already-built,
++        fully valid "natural" coupon (whose own paymentDate equals its
++        accrualEndDate, so every invariant of the wrapped class is
++        satisfied) and overriding only the *cash-flow date* used for
++        discounting/NPV/BPS purposes -- amount(), rate(), dayCounter(),
++        accruedAmount() and every accrual-related inspector (nominal(),
++        accrualStartDate(), accrualEndDate(), accrualPeriod(), ...,
++        inherited unchanged from the Coupon base) are computed exactly as
++        for the wrapped coupon, since the payment date does not enter
++        into any of those calculations for a standard floating coupon.
++    */
++    class EarlyPaymentCoupon : public Coupon {
++      public:
++        EarlyPaymentCoupon(const Date& paymentDate,
++                            ext::shared_ptr<Coupon> underlyingCoupon)
++        : Coupon(paymentDate, underlyingCoupon->nominal(),
++                 underlyingCoupon->accrualStartDate(), underlyingCoupon->accrualEndDate(),
++                 underlyingCoupon->referencePeriodStart(), underlyingCoupon->referencePeriodEnd(),
++                 underlyingCoupon->exCouponDate()),
++          underlyingCoupon_(std::move(underlyingCoupon)) {
++            registerWith(underlyingCoupon_);
++        }
++
++        //! \name CashFlow interface
++        //@{
++        Real amount() const override { return underlyingCoupon_->amount(); }
++        //@}
++        //! \name Coupon interface
++        //@{
++        Rate rate() const override { return underlyingCoupon_->rate(); }
++        DayCounter dayCounter() const override { return underlyingCoupon_->dayCounter(); }
++        Real accruedAmount(const Date& d) const override {
++            return underlyingCoupon_->accruedAmount(d);
++        }
++        //@}
++        //! \name Observer interface
++        //@{
++        /*! Forwards to the wrapped coupon's own deepUpdate(). This matters
++            during bootstrapping: Swap::deepUpdate() (called by
++            impliedQuote() before every NPV() re-evaluation) invalidates a
++            leg by calling deepUpdate() on each of its cash flows; without
++            this override the wrapped (naturally-dated) coupon's own cached
++            rate would never be invalidated, since nothing else in the leg
++            still points to it directly. registerWith(underlyingCoupon_) in
++            the constructor already handles ordinary Observer notifications
++            (e.g. a quote or curve changing outside of a bootstrap loop);
++            this override only adds the deepUpdate() forwarding that
++            Observer's default (shallow) implementation does not provide.
++        */
++        void deepUpdate() override {
++            underlyingCoupon_->deepUpdate();
++            update();
++        }
++        //@}
++
++        //! the wrapped, naturally-dated coupon this cash flow is redated from
++        const ext::shared_ptr<Coupon>& underlyingCoupon() const { return underlyingCoupon_; }
++
++      private:
++        ext::shared_ptr<Coupon> underlyingCoupon_;
++    };
++
++}
++
++#endif
+diff --git a/ql/cashflows/flatratecoupon.hpp b/ql/cashflows/flatratecoupon.hpp
+new file mode 100644
+index 0000000..2a7cc52
+--- /dev/null
++++ b/ql/cashflows/flatratecoupon.hpp
+@@ -0,0 +1,102 @@
++/* -*- mode: c++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
++
++/*
++ This file is part of a fork of QuantLib intended to add support for
++ "flat rate" coupons: a coupon that pays rate() * nominal() with no
++ accrual-period (day count fraction) scaling at all.
++
++ QuantLib is free software: you can redistribute it and/or modify it
++ under the terms of the QuantLib license.  You should have received a
++ copy of the license along with this program; if not, please email
++ <quantlib-dev@lists.sf.net>. The license is also available online at
++ <https://www.quantlib.org/license.shtml>.
++
++ This program is distributed in the hope that it will be useful, but WITHOUT
++ ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
++ FOR A PARTICULAR PURPOSE.  See the license for more details.
++*/
++
++/*! \file flatratecoupon.hpp
++    \brief coupon wrapper that pays rate()*nominal() with no day-count
++           accrual-period scaling at all
++*/
++
++#ifndef quantlib_flat_rate_coupon_hpp
++#define quantlib_flat_rate_coupon_hpp
++
++#include <ql/cashflows/coupon.hpp>
++#include <utility>
++
++namespace QuantLib {
++
++    //! Coupon that pays rate() * nominal(), skipping accrual-period scaling
++    /*! Wraps an already-built, fully valid "normal" coupon (whose own
++        amount() is rate()*accrualPeriod()*nominal(), as usual for a
++        floating coupon) and reports instead a flat amount equal to
++        rate()*nominal(), with no day-count accrual fraction applied at
++        all. Every other inspector (nominal(), accrualStartDate(),
++        accrualEndDate(), rate(), dayCounter(), ...) is delegated
++        unchanged to the wrapped coupon, so accrual/fixing metadata stays
++        meaningful for introspection even though it does not enter the
++        cash flow amount.
++
++        \warning Coupon::accrualPeriod() is declared non-virtual in
++                 QuantLib, so it cannot be overridden here: any code that
++                 computes a basis-point sensitivity via
++                 CashFlows::bps()/Swap::legBPS() (which multiplies by
++                 accrualPeriod()) will therefore NOT reflect this
++                 coupon's flat amount definition -- it would still use
++                 the wrapped coupon's real accrual period. Callers that
++                 need a BPS/implied-quote consistent with "no day count"
++                 for a leg wrapped this way (such as
++                 OvernightIborBasisSwapRateHelperForwardStarting, when
++                 the spread-bearing leg uses flat-rate payment) must
++                 compute that sensitivity directly instead of going
++                 through legBPS() for that leg.
++    */
++    class FlatRateCoupon : public Coupon {
++      public:
++        explicit FlatRateCoupon(ext::shared_ptr<Coupon> underlyingCoupon)
++        : Coupon(underlyingCoupon->date(), underlyingCoupon->nominal(),
++                 underlyingCoupon->accrualStartDate(), underlyingCoupon->accrualEndDate(),
++                 underlyingCoupon->referencePeriodStart(), underlyingCoupon->referencePeriodEnd(),
++                 underlyingCoupon->exCouponDate()),
++          underlyingCoupon_(std::move(underlyingCoupon)) {
++            registerWith(underlyingCoupon_);
++        }
++
++        //! \name CashFlow interface
++        //@{
++        Real amount() const override { return underlyingCoupon_->rate() * nominal(); }
++        //@}
++        //! \name Coupon interface
++        //@{
++        Rate rate() const override { return underlyingCoupon_->rate(); }
++        DayCounter dayCounter() const override { return underlyingCoupon_->dayCounter(); }
++        Real accruedAmount(const Date& d) const override {
++            // no accrual-period scaling: pay the full flat amount once the
++            // period has started, nothing before it
++            return (d <= accrualStartDate()) ? 0.0 : amount();
++        }
++        //@}
++        //! \name Observer interface
++        //@{
++        //! forwards to the wrapped coupon's own deepUpdate() -- see
++        //! EarlyPaymentCoupon::deepUpdate() for why this matters during
++        //! bootstrapping
++        void deepUpdate() override {
++            underlyingCoupon_->deepUpdate();
++            update();
++        }
++        //@}
++
++        //! the wrapped coupon this flat cash flow is computed from
++        const ext::shared_ptr<Coupon>& underlyingCoupon() const { return underlyingCoupon_; }
++
++      private:
++        ext::shared_ptr<Coupon> underlyingCoupon_;
++    };
++
++}
++
++#endif
 diff --git a/ql/math/interpolations/Makefile.am b/ql/math/interpolations/Makefile.am
 index d958dd9..19663ad 100644
 --- a/ql/math/interpolations/Makefile.am
@@ -786,10 +1050,10 @@ index b724707..74f0718 100644
  #include <ql/termstructures/yield/spreaddiscountcurve.hpp>
 diff --git a/ql/termstructures/yield/forwardstartingbasisswaphelper.hpp b/ql/termstructures/yield/forwardstartingbasisswaphelper.hpp
 new file mode 100644
-index 0000000..24145f0
+index 0000000..51bf6f3
 --- /dev/null
 +++ b/ql/termstructures/yield/forwardstartingbasisswaphelper.hpp
-@@ -0,0 +1,211 @@
+@@ -0,0 +1,338 @@
 +/* -*- mode: c++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
 +
 +/*
@@ -817,6 +1081,8 @@ index 0000000..24145f0
 +#ifndef quantlib_forward_starting_basis_swap_helper_hpp
 +#define quantlib_forward_starting_basis_swap_helper_hpp
 +
++#include <ql/cashflows/earlypaymentcoupon.hpp>
++#include <ql/cashflows/flatratecoupon.hpp>
 +#include <ql/cashflows/iborcoupon.hpp>
 +#include <ql/cashflows/overnightindexedcoupon.hpp>
 +#include <ql/experimental/termstructures/basisswapratehelpers.hpp>
@@ -851,6 +1117,41 @@ index 0000000..24145f0
 +        it, using the same mechanism as
 +        OvernightIborBasisSwapRateHelperCustomPillar (see
 +        ratehelperwithcustompillar.hpp).
++
++        \c customPaymentDate additionally supports an "early payment"
++        stub structure: the overnight and ibor legs still accrue/fix
++        over their real period (startDate to endDate), but both
++        coupons are *paid* on customPaymentDate instead of at their
++        natural accrual end -- e.g. a 3-month ESTR-vs-Euribor3M
++        instrument whose accrual/fixing genuinely runs spot -> spot+3M,
++        but whose cashflow is paid (and whose curve pillar naturally
++        sits) at an earlier IMM/ECB date, to avoid overlapping with the
++        next instrument on the curve. This only supports a single
++        accrual period per leg (i.e. overnightPaymentFrequency/the
++        ibor index tenor must span the whole startDate-to-endDate
++        range in one period); a QL_REQUIRE enforces this. When
++        customPaymentDate is given but customPillarDate is not, the
++        pillar defaults to customPaymentDate rather than to endDate.
++
++        \c overnightDayCounter / \c iborDayCounter let each leg use an
++        accrual day counter different from its index's native one (they
++        are simply forwarded to OvernightLeg::withPaymentDayCounter() /
++        IborLeg::withPaymentDayCounter()); leave them default-constructed
++        (empty) to keep each leg on its index's own day counter.
++
++        \c overnightFlatRatePayment / \c iborFlatRatePayment switch a
++        leg's cash flow to a *flat* definition, amount = rate() *
++        nominal(), with **no** day-count accrual-period scaling applied
++        at all (see ql/cashflows/flatratecoupon.hpp). This is for
++        instruments quoted/settled as a bare rate payment rather than a
++        pro-rata accrual. \warning when the leg carrying the basis
++        spread (overnight leg unless basisOnIborLeg is true) uses flat
++        payment, impliedQuote() computes that leg's basis-point
++        sensitivity directly (nominal discounted once at its payment
++        date) instead of via Swap::legBPS(), because
++        Coupon::accrualPeriod() is not virtual in QuantLib and so
++        cannot reflect the flat (non-accrual) definition through the
++        normal CashFlows::bps() machinery.
 +    */
 +    class OvernightIborBasisSwapRateHelperForwardStarting : public RateHelper {
 +      public:
@@ -872,11 +1173,18 @@ index 0000000..24145f0
 +                RateAveraging::Type averagingMethod = RateAveraging::Compound,
 +                bool telescopicValueDates = false,
 +                bool basisOnIborLeg = false,
-+                const Date& customPillarDate = Date())
++                const Date& customPillarDate = Date(),
++                const Date& customPaymentDate = Date(),
++                DayCounter overnightDayCounter = DayCounter(),
++                DayCounter iborDayCounter = DayCounter(),
++                bool overnightFlatRatePayment = false,
++                bool iborFlatRatePayment = false)
 +        : RateHelper(basis), startDate_(startDate), endDate_(endDate),
 +          calendar_(std::move(calendar)), convention_(convention), endOfMonth_(endOfMonth),
 +          discountHandle_(std::move(discountHandle)), bootstrapBaseCurve_(bootstrapBaseCurve),
-+          paymentLag_(paymentLag), basisOnIborLeg_(basisOnIborLeg) {
++          paymentLag_(paymentLag), basisOnIborLeg_(basisOnIborLeg),
++          overnightFlatRatePayment_(overnightFlatRatePayment),
++          iborFlatRatePayment_(iborFlatRatePayment) {
 +
 +            QL_REQUIRE(baseIndex, "null base overnight index");
 +            QL_REQUIRE(otherIndex, "null other ibor index");
@@ -913,12 +1221,25 @@ index 0000000..24145f0
 +                .endOfMonth(endOfMonth_)
 +                .withRule(rule);
 +
-+            Leg baseLeg = OvernightLeg(overnightSchedule, baseIndex_)
++            if (customPaymentDate != Date()) {
++                QL_REQUIRE(overnightSchedule.size() == 2 && overnightSchedule.dates().front() == startDate_ &&
++                           overnightSchedule.dates().back() == endDate_,
++                           "customPaymentDate is only supported for a single-period "
++                           "(stub) overnight schedule spanning startDate to endDate; "
++                           "got a schedule with " << overnightSchedule.size() <<
++                           " dates -- check that overnightPaymentFrequency spans the "
++                           "whole startDate-to-endDate period in one accrual period");
++            }
++
++            OvernightLeg overnightLegBuilder = OvernightLeg(overnightSchedule, baseIndex_)
 +                .withNotionals(100.0)
 +                .withPaymentLag(paymentLag_)
 +                .withTelescopicValueDates(
 +                    telescopicValueDates && averagingMethod == RateAveraging::Compound)
 +                .withAveragingMethod(averagingMethod);
++            if (overnightDayCounter != DayCounter())
++                overnightLegBuilder.withPaymentDayCounter(overnightDayCounter);
++            Leg baseLeg = overnightLegBuilder;
 +            auto lastBaseCoupon =
 +                ext::dynamic_pointer_cast<OvernightIndexedCoupon>(baseLeg.back());
 +
@@ -930,14 +1251,30 @@ index 0000000..24145f0
 +                .endOfMonth(endOfMonth_)
 +                .withRule(rule);
 +
-+            Leg otherLeg = IborLeg(iborSchedule, otherIndex_)
++            if (customPaymentDate != Date()) {
++                QL_REQUIRE(iborSchedule.size() == 2 && iborSchedule.dates().front() == startDate_ &&
++                           iborSchedule.dates().back() == endDate_,
++                           "customPaymentDate is only supported for a single-period "
++                           "(stub) ibor schedule spanning startDate to endDate; got a "
++                           "schedule with " << iborSchedule.size() << " dates -- check "
++                           "that the ibor index tenor spans the whole "
++                           "startDate-to-endDate period in one accrual period");
++            }
++
++            IborLeg iborLegBuilder = IborLeg(iborSchedule, otherIndex_)
 +                .withNotionals(100.0)
 +                .withPaymentLag(paymentLag_)
 +                .withIndexedCoupons(useIndexedCoupons);
++            if (iborDayCounter != DayCounter())
++                iborLegBuilder.withPaymentDayCounter(iborDayCounter);
++            Leg otherLeg = iborLegBuilder;
 +            auto lastOtherCoupon = ext::dynamic_pointer_cast<IborCoupon>(otherLeg.back());
 +
 +            maturityDate_ = std::max(overnightSchedule.endDate(), iborSchedule.endDate());
 +
++            // latestRelevantDate_ only cares about fixing/accrual horizons,
++            // which are unaffected by an early payment date -- compute it
++            // from the naturally-dated coupons before any redating below
 +            Date lastPaymentDate = std::max(baseLeg.back()->date(), otherLeg.back()->date());
 +            Date lastBaseFixingEndDate = baseIndex_->maturityDate(
 +                baseIndex_->valueDate(lastBaseCoupon->fixingDate()));
@@ -945,7 +1282,41 @@ index 0000000..24145f0
 +            latestRelevantDate_ = std::max({maturityDate_, lastPaymentDate,
 +                                            lastBaseFixingEndDate,
 +                                            lastOtherCoupon->fixingEndDate()});
-+            pillarDate_ = (customPillarDate != Date()) ? customPillarDate : endDate_;
++
++            // ext::shared_ptr<Coupon> so the two wrapping steps below (flat
++            // rate, then early payment) can be composed in either order
++            ext::shared_ptr<Coupon> baseCashFlow = lastBaseCoupon;
++            ext::shared_ptr<Coupon> otherCashFlow = lastOtherCoupon;
++
++            if (overnightFlatRatePayment_)
++                baseCashFlow = ext::make_shared<FlatRateCoupon>(baseCashFlow);
++            if (iborFlatRatePayment_)
++                otherCashFlow = ext::make_shared<FlatRateCoupon>(otherCashFlow);
++
++            if (customPaymentDate != Date()) {
++                // OvernightIndexedCoupon (and, more generally, several
++                // native coupon classes) structurally enforce paymentDate
++                // >= accrualEndDate in their own constructor, so an "early
++                // payment" stub cannot be built directly via the native
++                // OvernightLeg/IborLeg builders. Instead, keep the two
++                // naturally-built, fully valid coupons above (payment ==
++                // accrual end == endDate_) untouched for every accrual and
++                // fixing calculation, and only redate the *cash flow* seen
++                // by NPV/BPS to customPaymentDate via EarlyPaymentCoupon
++                // (see ql/cashflows/earlypaymentcoupon.hpp).
++                baseCashFlow = ext::make_shared<EarlyPaymentCoupon>(customPaymentDate, baseCashFlow);
++                otherCashFlow = ext::make_shared<EarlyPaymentCoupon>(customPaymentDate, otherCashFlow);
++            }
++
++            baseLeg.back() = baseCashFlow;
++            otherLeg.back() = otherCashFlow;
++
++            if (customPillarDate != Date())
++                pillarDate_ = customPillarDate;
++            else if (customPaymentDate != Date())
++                pillarDate_ = customPaymentDate;
++            else
++                pillarDate_ = endDate_;
 +
 +            swap_ = ext::make_shared<Swap>(baseLeg, otherLeg);
 +            swap_->setPricingEngine(
@@ -955,7 +1326,25 @@ index 0000000..24145f0
 +        Real impliedQuote() const override {
 +            swap_->deepUpdate();
 +            Size leg = basisOnIborLeg_ ? 1 : 0;
-+            return - (swap_->NPV() / swap_->legBPS(leg)) * 1.0e-4;
++            bool spreadLegIsFlat = (leg == 0) ? overnightFlatRatePayment_ : iborFlatRatePayment_;
++            Real bps;
++            if (spreadLegIsFlat) {
++                // Coupon::accrualPeriod() is not virtual, so
++                // Swap::legBPS()/CashFlows::bps() would still multiply by
++                // the wrapped coupon's REAL accrual period, which is wrong
++                // for a flat-rate (no day count) leg: amount = rate *
++                // nominal, so d(amount)/d(spread) = nominal, discounted
++                // once at the coupon's actual (possibly early) payment
++                // date. Swap(baseLeg, otherLeg)'s 2-leg constructor pays
++                // leg 0 and receives leg 1 (payer_ = {-1, +1}), matching
++                // the sign Swap::legBPS() applies internally.
++                Date payDate = swap_->leg(leg).back()->date();
++                Real sign = (leg == 0) ? -1.0 : 1.0;
++                bps = sign * 100.0 * discountRelinkableHandle_->discount(payDate) * 1.0e-4;
++            } else {
++                bps = swap_->legBPS(leg);
++            }
++            return - (swap_->NPV() / bps) * 1.0e-4;
 +        }
 +
 +        void accept(AcyclicVisitor& v) override {
@@ -992,6 +1381,8 @@ index 0000000..24145f0
 +        bool bootstrapBaseCurve_;
 +        Integer paymentLag_;
 +        bool basisOnIborLeg_;
++        bool overnightFlatRatePayment_;
++        bool iborFlatRatePayment_;
 +
 +        ext::shared_ptr<Swap> swap_;
 +        RelinkableHandle<YieldTermStructure> termStructureHandle_;
