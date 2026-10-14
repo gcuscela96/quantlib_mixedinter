@@ -88,10 +88,10 @@ index 0000000..0380809
 +}
 diff --git a/FRONTIER_MIXED_INTERPOLATION.md b/FRONTIER_MIXED_INTERPOLATION.md
 new file mode 100644
-index 0000000..7b3b780
+index 0000000..827c487
 --- /dev/null
 +++ b/FRONTIER_MIXED_INTERPOLATION.md
-@@ -0,0 +1,234 @@
+@@ -0,0 +1,433 @@
 +# Fork QuantLib: interpolazione mista con "data di frontiera"
 +
 +Questo fork aggiunge a QuantLib un nuovo schema di interpolazione per curve
@@ -326,8 +326,207 @@ index 0000000..7b3b780
 +pilastri e nel punto di frontiera, differiscono (come atteso) tra un
 +pilastro e l'altro, e sono entrambe continue (C0) alla frontiera fino
 +alla decima cifra decimale.
++
++## Helper aggiuntivi per la costruzione di curve: pillar custom, forward
++## start fisso, "pagamento anticipato", day count/flat rate custom
++
++Oltre allo schema di interpolazione, il fork aggiunge classi riutilizzabili
++per costruire strumenti di bootstrap con caratteristiche non coperte dagli
++helper nativi di QuantLib:
++
++- `ql/termstructures/yield/ratehelperwithcustompillar.hpp` —
++  `OvernightIborBasisSwapRateHelperCustomPillar`: stesso strumento e
++  stessa logica di bootstrap di `OvernightIborBasisSwapRateHelper`
++  nativo (spot -> spot+tenor), ma con il *pillar* di bootstrap forzato
++  a una data custom (es. una data ECB/IMM) invece che alla naturale
++  maturity dello strumento.
++
++- `ql/termstructures/yield/forwardstartingbasisswaphelper.hpp` —
++  `OvernightIborBasisSwapRateHelperForwardStarting`: stesso strumento,
++  ma con `startDate`/`endDate` *espliciti e fissi* (es. due date
++  IMM/ECB), indipendenti dalla evaluation date. Il pillar di default è
++  `endDate`, oppure un `customPillarDate` esplicito.
++
++  **`customPaymentDate` ("pagamento anticipato")**: entrambe le gambe
++  (overnight e ibor) continuano ad accrue/fixare sul loro vero periodo
++  (`startDate` -> `endDate`), ma il *pagamento* di entrambe le cedole
++  viene forzato su `customPaymentDate` invece che sulla naturale fine
++  accrual — tipico di uno strumento "STUB" il cui accrual/fixing copre
++  l'intero periodo reale (es. spot -> spot+3M) ma il cui cash flow è
++  pagato prima (es. su una data IMM), per non sovrapporsi al prossimo
++  strumento sulla curva. Se `customPillarDate` non è specificato, il
++  pillar di bootstrap si posiziona automaticamente su
++  `customPaymentDate` (non su `endDate`). Supportato solo per uno
++  schedule a un solo periodo (uno `QL_REQUIRE` lo impone: la
++  frequenza/il tenor dell'indice deve coprire l'intero periodo
++  startDate-endDate in una sola cedola per gamba). Implementato tramite
++  `ql/cashflows/earlypaymentcoupon.hpp` (`EarlyPaymentCoupon`): molte
++  classi di coupon native (in particolare `OvernightIndexedCoupon`)
++  impongono strutturalmente `paymentDate >= accrualEndDate` nel proprio
++  costruttore, quindi un "pagamento anticipato" non è costruibile
++  passando direttamente una data di pagamento anteriore tramite i
++  builder nativi. `EarlyPaymentCoupon` risolve il problema mantenendo
++  intatta la cedola "naturale" (con pagamento == fine accrual, quindi
++  valida per ogni invariante nativo) e avvolgendola in un wrapper che si
++  limita a *ridatare* il cash flow visto da NPV/BPS, delegando importo,
++  rate, day counter e accrued amount alla cedola naturale sottostante.
++  Nota tecnica: `EarlyPaymentCoupon` sovrascrive anche `deepUpdate()`
++  per propagarlo alla cedola sottostante, perché è esattamente il
++  meccanismo (`Swap::deepUpdate()`, chiamato da `impliedQuote()` prima
++  di ogni NPV) con cui QuantLib invalida la cache di una cedola prima di
++  ogni nuova valutazione del bootstrap; senza questo inoltro il tasso
++  della cedola avvolta resterebbe agganciato al primo valore calcolato,
++  dando un bootstrap "root not bracketed" con funzione obiettivo piatta.
++
++  **`overnightDayCounter` / `iborDayCounter`**: permettono a ciascuna
++  gamba di usare un day counter per l'accrual diverso da quello nativo
++  del proprio indice (sono semplicemente inoltrati a
++  `OvernightLeg::withPaymentDayCounter()` / `IborLeg::withPaymentDayCounter()`,
++  gia' nativamente supportati da QuantLib). Lasciarli di default
++  (costruiti vuoti) mantiene il day counter nativo dell'indice.
++
++  **`overnightFlatRatePayment` / `iborFlatRatePayment`** ("niente day
++  count"): commutano la gamba a un cash flow *flat*, `amount = rate() *
++  nominal()`, **senza alcuna** scalatura per accrual period/day count —
++  utile per strumenti quotati/regolati come un pagamento "a tasso secco"
++  anziché pro-rata. Implementato tramite una nuova classe gemella di
++  `EarlyPaymentCoupon`, `ql/cashflows/flatratecoupon.hpp`
++  (`FlatRateCoupon`), con lo stesso schema (avvolge la cedola naturale,
++  delega tutto tranne l'ammontare). **Attenzione**: `Coupon::accrualPeriod()`
++  non è virtuale in QuantLib, quindi non è sovrascrivibile — quando la
++  gamba che porta lo spread quotato (overnight, a meno che
++  `basisOnIborLeg` sia `true`) usa il pagamento flat,
++  `impliedQuote()` calcola la sensitivity al basis point di quella gamba
++  *direttamente* (nominale scontato una sola volta alla sua data di
++  pagamento) invece che tramite `Swap::legBPS()`, che altrimenti
++  moltiplicherebbe ancora per il vero accrual period del coupon
++  sottostante, dando un bootstrap errato.
++
++  I due meccanismi (day counter custom, pagamento flat) sono
++  indipendenti e combinabili per gamba, oltre che con `customPaymentDate`
++  (che resta condiviso da entrambe le gambe).
++
++Esempio Python (caso reale: basis ESTR-comp+spread vs Euribor fixing,
++entrambe le gambe senza day count nell'ammontare, stessa data di
++pagamento custom per entrambe, bootstrap della curva Euribor):
++
++```python
++helper = ql.OvernightIborBasisSwapRateHelperForwardStarting(
++    spot_date, real_end_date, basis_quote, calendar, ql.ModifiedFollowing, False,
++    estr, euribor3m, estr_handle, False,
++    basisOnIborLeg=False,                     # spread quotato sulla gamba ESTR
++    customPaymentDate=custom_payment_date,    # stessa data per entrambe le gambe
++    overnightFlatRatePayment=True,            # gamba ESTR: amount = (ESTR_comp+spread)*nominal
++    iborFlatRatePayment=True,                 # gamba Euribor: amount = fixing*nominal
++)
++```
++
++**Verificato in questa sessione**: sia in C++ standalone sia in Python
++end-to-end (bootstrap completo con `PiecewiseLinearZero`) per tutte le
++combinazioni — day counter custom da solo, pagamento flat sulla gamba
++overnight (quella con lo spread) insieme a `customPaymentDate`,
++pagamento flat sulla sola gamba ibor con la gamba spread invariata:
++in ogni caso l'implied quote riprezza esattamente il basis quotato
++(diff ~1e-13/1e-15), l'ammontare della gamba flat coincide esattamente
++con `rate()*nominal()` (e non con la versione scalata per accrual
++period), e il fixing Euribor implicito nella curva in costruzione resta
++quello correttamente usato dal bootstrap.
++
++## Curva di forwarding bootstrappata come spread su un backbone (`PiecewiseFrontierMixedRtZeroSpreaded`)
++
++Per costruire una curva di forwarding (es. Euribor) come spread additivo
++sullo zero rate di una curva backbone già nota (es. ESTR) — invece che
++come curva di zero rate assoluti indipendente — è disponibile la nuova
++classe `PiecewiseFrontierMixedRtZeroSpreaded`
++(`ql/termstructures/yield/piecewisefrontiermixedrtzerospreaded.hpp`).
++
++Definizione: `df_forwarding(t) = df_backbone(t) · exp(-spread(t) · t)`,
++equivalentemente `zero_forwarding(t) = zero_backbone(t) + spread(t)`
++(Act/365-style, continuous compounding — la convenzione dipende solo
++dalla formula sopra, non da un particolare day counter). La variabile
++bootstrappata ad ogni pillar è lo **spread**, non il tasso assoluto; lo
++spread usa lo stesso schema di interpolazione "frontier" (lineare in
++`spread·t` fino al pillar di frontiera, natural cubic spline in
++`spread·t` da lì in poi) già usato da `PiecewiseFrontierMixedRtZero`,
++con una propria `frontierTime` indipendente da quella del backbone.
++
++Perché serve una classe dedicata (non basta ri-usare
++`PiecewiseFrontierMixedRtZero` passandogli una discount handle diversa):
++il bootstrap "assoluto" normale forza il tratto di curva prima del primo
++pillar ad essere **piatto** (il nodo a t=0 è un placeholder che si
++annulla nella rappresentazione `rate·t`), perché l'unica informazione
++disponibile è il primo strumento. Se quel primo strumento ha una
++`customPaymentDate` anticipata rispetto alla reale fine di accrual (lo
++stub descritto sopra), quel singolo zero rate "assoluto" deve farsi
++carico sia del tratto breve iniziale sia del periodo di accrual reale,
++risultando in uno zero rate che non assomiglia affatto a un tasso
++short-term coerente. Costruendo invece la curva come spread sul backbone,
++il tratto breve iniziale eredita automaticamente la forma vera del
++backbone (che normalmente ha già pillar O/N, 1W, 1M, ecc.) con sopra
++uno spread che può restare piatto senza che questo comprometta la
++coerenza del tasso totale.
++
++Punti implementativi:
++- `discountImpl(t)` è sovrascritto per restituire
++  `backbone->discount(t) * exp(-spread_interpolato(t) * t)`; lo spread
++  interpolato viene letto tramite l'implementazione ereditata di
++  `ZeroYieldStructure::discountImpl()` (che a sua volta usa
++  `zeroYieldImpl()`, cioè l'interpolazione sui dati grezzi della curva),
++  bypassando la dispatch virtuale che altrimenti richiamerebbe
++  ricorsivamente la mia stessa `discountImpl()` sovrascritta.
++- I bootstrap traits standard di QuantLib (`ZeroYield`) usano
++  `c->zeroRate(...)` per stimare un "guess" iniziale sui pillar
++  successivi al primo — ma quella chiamata passa per `discount()` e
++  quindi per la `discountImpl()` sovrascritta, restituendo il tasso
++  TOTALE (backbone+spread) invece dello spread, un valore fuori scala
++  di ordini di grandezza come guess per lo spread. È stato quindi
++  necessario un trait dedicato, `SpreadedZeroYield`, identico a
++  `ZeroYield` tranne per il guess (che riusa semplicemente l'ultimo
++  spread risolto, letto direttamente dall'array dei dati grezzi, mai
++  tramite `zeroRate()`/`discount()`).
++- Il backbone va passato come `Handle<YieldTermStructure>` (anche
++  `RelinkableHandle`, compatibile per conversione implicita); la curva
++  si registra come observer del backbone, quindi una ricalibrazione di
++  quest'ultimo invalida automaticamente il bootstrap dello spread.
++- Lo sconto dei cash flow degli strumenti (basis swap helper, di
++  qualunque tipo: stub a singolo periodo con `customPaymentDate`, basis
++  swap "forward starting" multi-periodo, basis swap "spot starting"
++  multi-periodo) resta sempre sulla curva di discounting passata come
++  `discountHandle` all'helper (tipicamente la stessa curva backbone) —
++  non cambia nulla lato helper: la nuova classe è un drop-in replacement
++  del forecasting handle, gli helper esistenti non richiedono modifiche.
++- Vincolo di sicurezza: il day counter di questa curva deve coincidere
++  con quello del backbone (verificato con un `QL_REQUIRE` in
++  costruzione), perché il tempo `t` usato per interrogare
++  `backbone->discount(t)` viene preso as-is dal day counter di questa
++  curva, senza riconversione tramite `Date`.
++
++**Attenzione — caso limite numerico individuato durante i test**: con
++pochissimi pillar e un salto di scadenza molto ampio fra uno stub a
++pagamento anticipato e il pillar successivo, il tratto di natural cubic
++spline può deformarsi abbastanza, mentre il nodo dello stub viene
++perturbato durante la ricerca della radice, da rompere il bracketing
++della radice per quello stub ("root not bracketed" con entrambi gli
++estremi dello stesso segno). È una proprietà generale del fitting di una
++spline cubica naturale su pochi punti spaziati in modo molto irregolare,
++non specifica della composizione col backbone, e sparisce con un numero
++di pillar ragionevole e ben distribuito (come in una curva reale con
++decine di strumenti). Se dovesse ripresentarsi in pratica: aggiungere un
++pillar intermedio vicino allo stub, oppure usare una `frontierTime` più
++alta così che quel tratto resti nella (sempre ben posta) sezione lineare.
++
++**Verificato in questa sessione**: bootstrap end-to-end in C++ e in
++Python con tutti e tre i tipi di strumento misti nella stessa lista di
++helper (stub a singolo periodo con `customPaymentDate`, basis swap
++spot-starting multi-periodo, basis swap forward-starting multi-periodo)
++— ogni strumento riprezza esattamente la propria quota di mercato
++(`impliedQuote() == quote()` a precisione di macchina), e lo zero rate
++totale della curva di forwarding segue correttamente la forma del
++backbone più lo spread bootstrappato (verificato confrontando
++`zero_fwd(t) - zero_estr(t)` contro lo spread atteso in più punti,
++inclusi punti prima del primo pillar).
 diff --git a/ql/CMakeLists.txt b/ql/CMakeLists.txt
-index 436612a..22004d7 100644
+index 436612a..ae1bf70 100644
 --- a/ql/CMakeLists.txt
 +++ b/ql/CMakeLists.txt
 @@ -1007,8 +1007,10 @@ set(QL_HEADERS
@@ -357,7 +556,11 @@ index 436612a..22004d7 100644
      termstructures/yield/forwardstructure.hpp
      termstructures/yield/impliedtermstructure.hpp
      termstructures/yield/interpolatedsimplezerocurve.hpp
-@@ -2221,6 +2225,7 @@ set(QL_HEADERS
+@@ -2218,9 +2222,11 @@ set(QL_HEADERS
+     termstructures/yield/oisratehelper.hpp
+     termstructures/yield/overnightindexfutureratehelper.hpp
+     termstructures/yield/piecewisespreadyieldcurve.hpp
++    termstructures/yield/piecewisefrontiermixedrtzerospreaded.hpp
      termstructures/yield/piecewiseyieldcurve.hpp
      termstructures/yield/piecewisezerospreadedtermstructure.hpp
      termstructures/yield/quantotermstructure.hpp
@@ -1015,7 +1218,7 @@ index 0000000..0309ef2
 +
 +#endif
 diff --git a/ql/termstructures/yield/Makefile.am b/ql/termstructures/yield/Makefile.am
-index 6824ab7..1bc44e5 100644
+index 6824ab7..5adf4e5 100644
 --- a/ql/termstructures/yield/Makefile.am
 +++ b/ql/termstructures/yield/Makefile.am
 @@ -13,6 +13,7 @@ this_include_HEADERS = \
@@ -1026,7 +1229,12 @@ index 6824ab7..1bc44e5 100644
      forwardstructure.hpp \
      impliedtermstructure.hpp \
      interpolatedsimplezerocurve.hpp \
-@@ -25,6 +26,7 @@ this_include_HEADERS = \
+@@ -21,10 +22,12 @@ this_include_HEADERS = \
+     oisratehelper.hpp \
+     overnightindexfutureratehelper.hpp \
+     piecewisespreadyieldcurve.hpp \
++    piecewisefrontiermixedrtzerospreaded.hpp \
+     piecewiseyieldcurve.hpp \
      piecewiseforwardspreadedtermstructure.hpp \
      piecewisezerospreadedtermstructure.hpp \
      quantotermstructure.hpp \
@@ -1035,10 +1243,14 @@ index 6824ab7..1bc44e5 100644
      spreadbootstraptraits.hpp \
      spreaddiscountcurve.hpp \
 diff --git a/ql/termstructures/yield/all.hpp b/ql/termstructures/yield/all.hpp
-index b724707..74f0718 100644
+index b724707..8b252a7 100644
 --- a/ql/termstructures/yield/all.hpp
 +++ b/ql/termstructures/yield/all.hpp
-@@ -21,7 +21,9 @@
+@@ -18,10 +18,13 @@
+ #include <ql/termstructures/yield/oisratehelper.hpp>
+ #include <ql/termstructures/yield/overnightindexfutureratehelper.hpp>
+ #include <ql/termstructures/yield/piecewisespreadyieldcurve.hpp>
++#include <ql/termstructures/yield/piecewisefrontiermixedrtzerospreaded.hpp>
  #include <ql/termstructures/yield/piecewiseyieldcurve.hpp>
  #include <ql/termstructures/yield/piecewiseforwardspreadedtermstructure.hpp>
  #include <ql/termstructures/yield/piecewisezerospreadedtermstructure.hpp>
@@ -1387,6 +1599,259 @@ index 0000000..51bf6f3
 +        ext::shared_ptr<Swap> swap_;
 +        RelinkableHandle<YieldTermStructure> termStructureHandle_;
 +        RelinkableHandle<YieldTermStructure> discountRelinkableHandle_;
++    };
++
++}
++
++#endif
+diff --git a/ql/termstructures/yield/piecewisefrontiermixedrtzerospreaded.hpp b/ql/termstructures/yield/piecewisefrontiermixedrtzerospreaded.hpp
+new file mode 100644
+index 0000000..8e42fdc
+--- /dev/null
++++ b/ql/termstructures/yield/piecewisefrontiermixedrtzerospreaded.hpp
+@@ -0,0 +1,247 @@
++/* -*- mode: c++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
++
++/*
++ This file is part of a fork of QuantLib intended to add support for
++ bootstrapping a forwarding curve as an additive zero-rate spread on top
++ of a backbone (discounting) curve, e.g. a Euribor forwarding curve built
++ as "ESTR zero rate (interpolated) + spread zero rate", with the spread
++ itself bootstrapped using the "frontier" linear/cubic mixed scheme
++ already used elsewhere in this fork.
++
++ QuantLib is free software: you can redistribute it and/or modify it
++ under the terms of the QuantLib license.  You should have received a
++ copy of the license along with this program; if not, please email
++ <quantlib-dev@lists.sf.net>. The license is also available online at
++ <https://www.quantlib.org/license.shtml>.
++
++ This program is distributed in the hope that it will be useful, but WITHOUT
++ ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
++ FOR A PARTICULAR PURPOSE.  See the license for more details.
++*/
++
++/*! \file piecewisefrontiermixedrtzerospreaded.hpp
++    \brief piecewise zero-spread curve (frontier linear/cubic-in-r*t mixed
++           interpolation) on top of a backbone discounting/forecasting curve
++*/
++
++#ifndef quantlib_piecewise_frontier_mixed_rt_zero_spreaded_hpp
++#define quantlib_piecewise_frontier_mixed_rt_zero_spreaded_hpp
++
++#include <ql/termstructures/yield/piecewiseyieldcurve.hpp>
++#include <ql/math/interpolations/frontierlinearrtcubicinterpolation.hpp>
++#include <utility>
++
++namespace QuantLib {
++
++    //! Zero-rate-SPREAD curve traits
++    /*! Identical to the stock QuantLib::ZeroYield traits, except for the
++        bootstrap guess used for pillars beyond the first one.
++
++        QuantLib::ZeroYield::guess() extrapolates a starting guess for a new
++        pillar by calling <tt>c->zeroRate(d, dayCounter, Continuous, Annual,
++        true)</tt> on the curve being built. For a plain absolute-rate curve
++        this is a sensible flat-forward extrapolation of the curve's own
++        data. For PiecewiseFrontierMixedRtZeroSpreaded, however,
++        <tt>zeroRate()</tt> (like any other public YieldTermStructure
++        accessor) goes through the curve's *overridden* discountImpl(),
++        which returns the backbone-plus-spread TOTAL rate -- using that as
++        a guess for the SPREAD unknown would be wrong by orders of
++        magnitude (e.g. guessing ~3% for a ~10bp spread), and in practice
++        corrupts later global re-fits of the frontier cubic segment enough
++        to break root bracketing on earlier pillars.
++
++        SpreadedZeroYield::guess() instead falls back to the previous
++        pillar's already-bootstrapped spread value (a flat guess), reading
++        it directly from the curve's raw data array -- never through the
++        polymorphic zeroRate()/discount() chain -- so it stays correct
++        regardless of what discountImpl() has been overridden to do.
++    */
++    struct SpreadedZeroYield {
++        template <class Interpolator>
++        struct curve {
++            typedef InterpolatedZeroCurve<Interpolator> type;
++        };
++        typedef BootstrapHelper<YieldTermStructure> helper;
++
++        static Date initialDate(const YieldTermStructure* c) {
++            return c->referenceDate();
++        }
++        // dummy value at reference date (irrelevant: multiplied by t=0)
++        static Real initialValue(const YieldTermStructure*) {
++            return 0.0;
++        }
++
++        template <class C>
++        static Real guess(Size i, const C* c, bool validData, Size) {
++            if (validData) // previous iteration value
++                return c->data()[i];
++
++            if (i == 1) // first pillar: no prior spread data to extrapolate from
++                return 0.0;
++
++            // flat guess: reuse the previous *spread* node directly (never
++            // through zeroRate()/discountImpl(), which would return the
++            // backbone+spread total on this curve type)
++            return c->data()[i - 1];
++        }
++
++        template <class C>
++        static std::pair<Array, bool> globalGuess(const C* c, bool validData) {
++            if (validData)
++                return {Array(c->data().begin() + 1, c->data().end()), true};
++            return {Array(c->times().size() - 1, 0.0), true};
++        }
++
++        template <class C>
++        static Real minValueAfter(Size, const C* c, bool validData, Size) {
++            if (validData) {
++                Real r = *(std::min_element(c->data().begin(), c->data().end()));
++                return r < 0.0 ? Real(r * 2.0) : Real(r / 2.0);
++            }
++            return -1.0;
++        }
++        template <class C>
++        static Real maxValueAfter(Size, const C* c, bool validData, Size) {
++            if (validData) {
++                Real r = *(std::max_element(c->data().begin(), c->data().end()));
++                return r < 0.0 ? Real(r / 2.0) : Real(r * 2.0);
++            }
++            return 1.0;
++        }
++
++        static void updateGuess(std::vector<Real>& data, Real rate, Size i) {
++            data[i] = rate;
++            if (i == 1)
++                data[0] = rate;
++        }
++        static Size maxIterations() { return 100; }
++    };
++
++    //! Piecewise zero-rate-spread term structure on top of a backbone curve
++    /*! Bootstraps a zero-rate spread s(t) -- using the same "frontier"
++        linear-in-(s*t) / natural-cubic-in-(s*t) mixed interpolation scheme
++        already used by PiecewiseFrontierMixedRtZero -- such that the
++        resulting discount factor is
++
++            df(t) = backbone->discount(t) * exp(-s(t) * t)
++
++        i.e. the exposed curve's zero rate is always the backbone's zero
++        rate (as given by the backbone curve's own interpolation) plus the
++        bootstrapped spread s(t). This is the standard "forwarding curve
++        bootstrapped as a spread over a discounting backbone" construction
++        (e.g. a Euribor curve built as ESTR + spread), as opposed to
++        bootstrapping the forwarding curve's absolute zero rate directly.
++
++        The rate helpers passed to this curve must have their forecasting
++        curve handle relinked to *this* curve (the usual QuantLib
++        self-referencing bootstrap pattern: the handle is relinked
++        automatically to the object under construction), exactly as for
++        any other PiecewiseYieldCurve -- nothing in the helper code needs
++        to change: this class is a drop-in replacement wherever a plain
++        PiecewiseYieldCurve<ZeroYield, Interpolator> was used as the
++        forecasting curve, transparently combining the backbone and the
++        bootstrapped spread behind the same Handle<YieldTermStructure>
++        interface.
++
++        \warning With very few pillars and a large gap in maturity between
++                 an early-payment stub (customPaymentDate before the real
++                 accrual end) and the next pillar, the natural cubic
++                 segment of the frontier interpolation can reshape sharply
++                 enough, as the stub's own node is perturbed during the
++                 root search, to break root bracketing for that stub
++                 ("root not bracketed" with both endpoints on the same
++                 side of zero). This is a property of fitting a natural
++                 cubic spline to widely and unevenly spaced points, not
++                 specific to the backbone composition; it disappears once
++                 the curve has a reasonably dense, evenly spaced set of
++                 pillars (as a real multi-instrument curve normally does).
++                 If it is hit in practice, add an intermediate pillar near
++                 the stub, or use \c FrontierLinearRtCubic with a higher
++                 \c frontierTime so the problematic region stays in the
++                 (always well-behaved) linear segment.
++
++        \warning The \c dayCounter passed to this curve should match the
++                 backbone's own day counter. The spread's own time metric
++                 \c t (computed from this curve's reference date and day
++                 counter) is used as-is to query
++                 <tt>backbone->discount(t)</tt>; if the two day counters
++                 disagree, that raw \c t means different things for the
++                 two curves and the composition above is no longer
++                 consistent. A day-counter mismatch is detected and
++                 rejected at construction time.
++
++        \ingroup yieldtermstructures
++    */
++    class PiecewiseFrontierMixedRtZeroSpreaded
++        : public PiecewiseYieldCurve<SpreadedZeroYield, FrontierLinearRtCubicNaturalRt> {
++      private:
++        typedef PiecewiseYieldCurve<SpreadedZeroYield, FrontierLinearRtCubicNaturalRt> base_t;
++      public:
++        //! \name Constructors
++        //@{
++        PiecewiseFrontierMixedRtZeroSpreaded(
++                const Date& referenceDate,
++                std::vector<ext::shared_ptr<BootstrapHelper<YieldTermStructure> > > instruments,
++                const DayCounter& dayCounter,
++                Handle<YieldTermStructure> backbone,
++                Time frontierTime,
++                const std::vector<Handle<Quote> >& jumps = {},
++                const std::vector<Date>& jumpDates = {})
++        : base_t(referenceDate, std::move(instruments), dayCounter, jumps, jumpDates,
++                 FrontierLinearRtCubicNaturalRt(frontierTime)),
++          backbone_(std::move(backbone)) {
++            checkBackbone();
++            registerWith(backbone_);
++        }
++
++        PiecewiseFrontierMixedRtZeroSpreaded(
++                Natural settlementDays,
++                const Calendar& calendar,
++                std::vector<ext::shared_ptr<BootstrapHelper<YieldTermStructure> > > instruments,
++                const DayCounter& dayCounter,
++                Handle<YieldTermStructure> backbone,
++                Time frontierTime,
++                const std::vector<Handle<Quote> >& jumps = {},
++                const std::vector<Date>& jumpDates = {})
++        : base_t(settlementDays, calendar, std::move(instruments), dayCounter,
++                 jumps, jumpDates, FrontierLinearRtCubicNaturalRt(frontierTime)),
++          backbone_(std::move(backbone)) {
++            checkBackbone();
++            registerWith(backbone_);
++        }
++        //@}
++
++        //! the backbone (discounting/forecasting) curve the spread is built on
++        const Handle<YieldTermStructure>& backboneCurve() const { return backbone_; }
++
++      protected:
++        DiscountFactor discountImpl(Time t) const override {
++            // trigger the lazy bootstrap of the spread nodes, exactly as
++            // PiecewiseYieldCurve<...>::discountImpl() would; we cannot
++            // call that method directly since it is private in the base,
++            // so we replicate it: calculate(), then read the *spread's*
++            // discount factor via the inherited ZeroYieldStructure
++            // implementation (which uses this curve's own interpolated
++            // data, i.e. the bootstrapped spread, not an absolute rate).
++            calculate();
++            DiscountFactor spreadDf = this->ZeroYieldStructure::discountImpl(t);
++            return backbone_->discount(t) * spreadDf;
++        }
++
++      private:
++        void checkBackbone() const {
++            QL_REQUIRE(!backbone_.empty(),
++                       "PiecewiseFrontierMixedRtZeroSpreaded: empty backbone curve handle");
++            QL_REQUIRE(backbone_->dayCounter().name() == this->dayCounter().name(),
++                       "PiecewiseFrontierMixedRtZeroSpreaded: backbone day counter ("
++                       << backbone_->dayCounter().name() << ") must match this curve's "
++                       "day counter (" << this->dayCounter().name() << "); the spread's "
++                       "time metric is used as-is to query the backbone's discount factor");
++        }
++
++        Handle<YieldTermStructure> backbone_;
 +    };
 +
 +}

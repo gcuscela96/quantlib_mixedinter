@@ -75,10 +75,10 @@ index 615d8fc..0adc610 100644
  using QuantLib::RichardsonExtrapolation;
  %}
 diff --git a/SWIG/piecewiseyieldcurve.i b/SWIG/piecewiseyieldcurve.i
-index a7121b6..e18bd10 100644
+index a7121b6..5b50c55 100644
 --- a/SWIG/piecewiseyieldcurve.i
 +++ b/SWIG/piecewiseyieldcurve.i
-@@ -180,6 +180,11 @@ export_piecewise_curve(PiecewiseParabolicCubicZero,ZeroYield,ParabolicCubic);
+@@ -180,6 +180,57 @@ export_piecewise_curve(PiecewiseParabolicCubicZero,ZeroYield,ParabolicCubic);
  export_piecewise_curve(PiecewiseMonotonicParabolicCubicZero,ZeroYield,MonotonicParabolicCubic);
  export_piecewise_curve(PiecewiseLogParabolicCubicDiscount,Discount,LogParabolicCubic);
  export_piecewise_curve(PiecewiseMonotonicLogParabolicCubicDiscount,Discount,MonotonicLogParabolicCubic);
@@ -87,6 +87,52 @@ index a7121b6..e18bd10 100644
 +// ql/math/interpolations/frontierlinearrtcubicinterpolation.hpp
 +export_piecewise_curve(PiecewiseFrontierMixedZero,ZeroYield,FrontierLinearRtCubicNatural);
 +export_piecewise_curve(PiecewiseFrontierMixedRtZero,ZeroYield,FrontierLinearRtCubicNaturalRt);
++
++// forwarding curve bootstrapped as an additive zero-rate spread on top of a
++// backbone (discounting) curve, e.g. Euribor = ESTR (interpolated) + spread,
++// with the spread itself using the frontier linear/cubic-in-(s*t) mixed
++// scheme above -- see
++// ql/termstructures/yield/piecewisefrontiermixedrtzerospreaded.hpp
++%{
++using QuantLib::PiecewiseFrontierMixedRtZeroSpreaded;
++%}
++
++%shared_ptr(PiecewiseFrontierMixedRtZeroSpreaded);
++class PiecewiseFrontierMixedRtZeroSpreaded : public YieldTermStructure {
++  public:
++    #if !defined(SWIGJAVA) && !defined(SWIGCSHARP)
++    %feature("kwargs") PiecewiseFrontierMixedRtZeroSpreaded;
++    #endif
++    PiecewiseFrontierMixedRtZeroSpreaded(
++        const Date& referenceDate,
++        const std::vector<ext::shared_ptr<RateHelper> >& instruments,
++        const DayCounter& dayCounter,
++        const Handle<YieldTermStructure>& backbone,
++        Time frontierTime,
++        const std::vector<Handle<Quote> >& jumps = std::vector<Handle<Quote> >(),
++        const std::vector<Date>& jumpDates = std::vector<Date>());
++    PiecewiseFrontierMixedRtZeroSpreaded(
++        Integer settlementDays, const Calendar& calendar,
++        const std::vector<ext::shared_ptr<RateHelper> >& instruments,
++        const DayCounter& dayCounter,
++        const Handle<YieldTermStructure>& backbone,
++        Time frontierTime,
++        const std::vector<Handle<Quote> >& jumps = std::vector<Handle<Quote> >(),
++        const std::vector<Date>& jumpDates = std::vector<Date>());
++
++    const Handle<YieldTermStructure>& backboneCurve() const;
++
++    const std::vector<Date>& dates() const;
++    const std::vector<Time>& times() const;
++    const std::vector<Real>& data() const;
++    #if !defined(SWIGR)
++    std::vector<std::pair<Date,Real> > nodes() const;
++    #endif
++
++    void recalculate();
++    void freeze();
++    void unfreeze();
++};
  
  
  // global bootstrapper
