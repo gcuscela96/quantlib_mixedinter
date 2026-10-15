@@ -201,7 +201,7 @@ index a7121b6..9df3164 100644
  
  // global bootstrapper
 diff --git a/SWIG/ratehelpers.i b/SWIG/ratehelpers.i
-index b95a232..841e21c 100644
+index b95a232..b3d821d 100644
 --- a/SWIG/ratehelpers.i
 +++ b/SWIG/ratehelpers.i
 @@ -51,6 +51,8 @@ using QuantLib::ConstNotionalCrossCurrencyBasisSwapRateHelper;
@@ -213,7 +213,7 @@ index b95a232..841e21c 100644
  using QuantLib::OvernightOvernightBasisSwapRateHelper;
  using QuantLib::OvernightIndexedFundingRateHelper;
  using QuantLib::MultipleResetsSwapRateHelper;
-@@ -754,6 +756,87 @@ class OvernightIborBasisSwapRateHelper : public RateHelper {
+@@ -754,6 +756,90 @@ class OvernightIborBasisSwapRateHelper : public RateHelper {
      ext::shared_ptr<Swap> swap();
  };
  
@@ -270,6 +270,8 @@ index b95a232..841e21c 100644
 +    // from its index's native one. overnightFlatRatePayment/
 +    // iborFlatRatePayment switch a leg's cash flow to amount = rate() *
 +    // nominal() with NO day-count accrual-period scaling at all.
++    // firstIborRate (optional quote): the first cash flow of the ibor leg
++    // pays this rate instead of the forward read from the curve.
 +    // -- see ql/termstructures/yield/forwardstartingbasisswaphelper.hpp
 +    OvernightIborBasisSwapRateHelperForwardStarting(
 +                                     const Date& startDate,
@@ -294,7 +296,8 @@ index b95a232..841e21c 100644
 +                                     DayCounter overnightDayCounter = DayCounter(),
 +                                     DayCounter iborDayCounter = DayCounter(),
 +                                     bool overnightFlatRatePayment = false,
-+                                     bool iborFlatRatePayment = false);
++                                     bool iborFlatRatePayment = false,
++                                     const Handle<Quote>& firstIborRate = Handle<Quote>());
 +    ext::shared_ptr<Swap> swap();
 +};
 +

@@ -88,10 +88,10 @@ index 0000000..0380809
 +}
 diff --git a/FRONTIER_MIXED_INTERPOLATION.md b/FRONTIER_MIXED_INTERPOLATION.md
 new file mode 100644
-index 0000000..3776a21
+index 0000000..30ca5b7
 --- /dev/null
 +++ b/FRONTIER_MIXED_INTERPOLATION.md
-@@ -0,0 +1,491 @@
+@@ -0,0 +1,528 @@
 +# Fork QuantLib: interpolazione mista con "data di frontiera"
 +
 +Questo fork aggiunge a QuantLib un nuovo schema di interpolazione per curve
@@ -583,11 +583,48 @@ index 0000000..3776a21
 +massimo 2e-14). Sul caso a 4 helper dà gli stessi nodi dell'iterativo.
 +Su curve standard (ZeroYield/Linear, ZeroYield/Cubic, Discount/LogLinear,
 +ForwardRate/BackwardFlat, 8 swap) coincide con l'iterativo entro 1e-12.
++
++## Primo flusso Euribor a tasso custom (`firstIborRate`)
++
++`OvernightIborBasisSwapRateHelperForwardStarting` ha un nuovo parametro
++opzionale in coda, `firstIborRate` (`Handle<Quote>`). Se è dato, il
++**primo flusso della gamba Euribor** paga il tasso della quota invece del
++forward letto dalla curva in costruzione. L'importo è
++`tasso × accrual period × nominale`; le cedole successive continuano a
++essere stimate dalla curva. Si compone con `iborFlatRatePayment` e con
++`customPaymentDate`.
++
++Il flusso è realizzato dal nuovo coupon `OverriddenRateCoupon`
++(`ql/cashflows/overriddenratecoupon.hpp`), che incapsula la cedola
++originale e sostituisce solo `rate()`. Il coupon osserva la quota: se la
++modifichi, l'helper si aggiorna e la curva viene ricalcolata.
++
++```python
++fr = ql.SimpleQuote(0.0290)          # tasso del primo flusso Euribor 3M
++h = ql.OvernightIborBasisSwapRateHelperForwardStarting(
++    spot, spot_end, quote, calendar, ql.ModifiedFollowing, False,
++    estr, euribor3m, estr_handle, False,
++    firstIborRate=ql.QuoteHandle(fr))
++```
++
++**Avvertenze**:
++
++- L'helper che pinna la curva sullo stesso periodo (lo stub) **non**
++  deve usarlo: il suo errore non dipenderebbe più dal nodo della curva e il
++  bootstrap sarebbe singolare.
++- Per essere coerente con lo stub, `firstIborRate` dovrebbe valere
++  `ESTR_comp + quota dello stub` sul periodo. Se è molto diverso, i nodi
++  iniziali della curva si deformano per assorbire la differenza (in un test
++  con 2,90% contro un forward implicito di 2,70%, il nodo dello stub passa
++  da 4 bp a 27 bp e quello del 1Y da 10 bp a 5 bp).
++- Per gli swap spot-starting usa questo helper con `startDate = spot` al
++  posto di `OvernightIborBasisSwapRateHelper` nativo, che non ha il
++  parametro.
 diff --git a/ql/CMakeLists.txt b/ql/CMakeLists.txt
-index 436612a..ae1bf70 100644
+index 436612a..841110c 100644
 --- a/ql/CMakeLists.txt
 +++ b/ql/CMakeLists.txt
-@@ -1007,8 +1007,10 @@ set(QL_HEADERS
+@@ -1007,8 +1007,11 @@ set(QL_HEADERS
      cashflows/digitaliborcoupon.hpp
      cashflows/dividend.hpp
      cashflows/duration.hpp
@@ -595,10 +632,11 @@ index 436612a..ae1bf70 100644
      cashflows/equitycashflow.hpp
      cashflows/fixedratecoupon.hpp
 +    cashflows/flatratecoupon.hpp
++    cashflows/overriddenratecoupon.hpp
      cashflows/floatingratecoupon.hpp
      cashflows/iborcoupon.hpp
      cashflows/indexedcashflow.hpp
-@@ -1514,6 +1516,7 @@ set(QL_HEADERS
+@@ -1514,6 +1517,7 @@ set(QL_HEADERS
      math/interpolations/flatextrapolation.hpp
      math/interpolations/flatextrapolation2d.hpp
      math/interpolations/forwardflatinterpolation.hpp
@@ -606,7 +644,7 @@ index 436612a..ae1bf70 100644
      math/interpolations/interpolation2d.hpp
      math/interpolations/kernelinterpolation.hpp
      math/interpolations/kernelinterpolation2d.hpp
-@@ -2210,6 +2213,7 @@ set(QL_HEADERS
+@@ -2210,6 +2214,7 @@ set(QL_HEADERS
      termstructures/yield/flatforward.hpp
      termstructures/yield/forwardcurve.hpp
      termstructures/yield/forwardspreadedtermstructure.hpp
@@ -614,7 +652,7 @@ index 436612a..ae1bf70 100644
      termstructures/yield/forwardstructure.hpp
      termstructures/yield/impliedtermstructure.hpp
      termstructures/yield/interpolatedsimplezerocurve.hpp
-@@ -2218,9 +2222,11 @@ set(QL_HEADERS
+@@ -2218,9 +2223,11 @@ set(QL_HEADERS
      termstructures/yield/oisratehelper.hpp
      termstructures/yield/overnightindexfutureratehelper.hpp
      termstructures/yield/piecewisespreadyieldcurve.hpp
@@ -627,10 +665,10 @@ index 436612a..ae1bf70 100644
      termstructures/yield/spreadbootstraptraits.hpp
      termstructures/yield/spreaddiscountcurve.hpp
 diff --git a/ql/cashflows/Makefile.am b/ql/cashflows/Makefile.am
-index b35ad9d..3055881 100644
+index b35ad9d..750ea74 100644
 --- a/ql/cashflows/Makefile.am
 +++ b/ql/cashflows/Makefile.am
-@@ -21,8 +21,10 @@ this_include_HEADERS = \
+@@ -21,8 +21,11 @@ this_include_HEADERS = \
      digitaliborcoupon.hpp \
      dividend.hpp \
      duration.hpp \
@@ -638,14 +676,15 @@ index b35ad9d..3055881 100644
      equitycashflow.hpp \
      fixedratecoupon.hpp \
 +    flatratecoupon.hpp \
++    overriddenratecoupon.hpp \
      floatingratecoupon.hpp \
      iborcoupon.hpp \
      indexedcashflow.hpp \
 diff --git a/ql/cashflows/all.hpp b/ql/cashflows/all.hpp
-index 124b93b..68b529f 100644
+index 124b93b..f0fb9ed 100644
 --- a/ql/cashflows/all.hpp
 +++ b/ql/cashflows/all.hpp
-@@ -18,8 +18,10 @@
+@@ -18,8 +18,11 @@
  #include <ql/cashflows/digitaliborcoupon.hpp>
  #include <ql/cashflows/dividend.hpp>
  #include <ql/cashflows/duration.hpp>
@@ -653,6 +692,7 @@ index 124b93b..68b529f 100644
  #include <ql/cashflows/equitycashflow.hpp>
  #include <ql/cashflows/fixedratecoupon.hpp>
 +#include <ql/cashflows/flatratecoupon.hpp>
++#include <ql/cashflows/overriddenratecoupon.hpp>
  #include <ql/cashflows/floatingratecoupon.hpp>
  #include <ql/cashflows/iborcoupon.hpp>
  #include <ql/cashflows/indexedcashflow.hpp>
@@ -874,6 +914,104 @@ index 0000000..2a7cc52
 +
 +      private:
 +        ext::shared_ptr<Coupon> underlyingCoupon_;
++    };
++
++}
++
++#endif
+diff --git a/ql/cashflows/overriddenratecoupon.hpp b/ql/cashflows/overriddenratecoupon.hpp
+new file mode 100644
+index 0000000..0a53988
+--- /dev/null
++++ b/ql/cashflows/overriddenratecoupon.hpp
+@@ -0,0 +1,92 @@
++/* -*- mode: c++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
++
++/*
++ This file is part of a fork of QuantLib intended to add support for a
++ floating coupon whose rate is not forecast from a curve but taken from
++ a user-supplied quote (e.g. a known or desired first Euribor fixing).
++
++ QuantLib is free software: you can redistribute it and/or modify it
++ under the terms of the QuantLib license.  You should have received a
++ copy of the license along with this program; if not, please email
++ <quantlib-dev@lists.sf.net>. The license is also available online at
++ <https://www.quantlib.org/license.shtml>.
++
++ This program is distributed in the hope that it will be useful, but WITHOUT
++ ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
++ FOR A PARTICULAR PURPOSE.  See the license for more details.
++*/
++
++/*! \file overriddenratecoupon.hpp
++    \brief coupon wrapper whose rate is a given quote instead of the
++           wrapped coupon's own (curve-forecast) rate
++*/
++
++#ifndef quantlib_overridden_rate_coupon_hpp
++#define quantlib_overridden_rate_coupon_hpp
++
++#include <ql/cashflows/coupon.hpp>
++#include <ql/quote.hpp>
++#include <ql/handle.hpp>
++#include <utility>
++
++namespace QuantLib {
++
++    //! Coupon that pays a given rate instead of the wrapped coupon's rate
++    /*! Wraps an already-built coupon and replaces its rate() with the
++        value of a quote. The amount is rate() * accrualPeriod() *
++        nominal(), the accrual period being computed exactly as for the
++        wrapped coupon (same day counter, accrual and reference
++        periods). The payment date and every other inspector are those
++        of the wrapped coupon.
++
++        The wrapped coupon's own rate (and so the forecasting curve)
++        plays no role: the cash flow does not depend on any term
++        structure, only on the quote, which the coupon observes.
++        Typical use: the first Euribor flow of a spot-starting basis
++        swap when it is already known, or has to be fixed to a
++        user-chosen value, when bootstrapping the Euribor curve.
++    */
++    class OverriddenRateCoupon : public Coupon {
++      public:
++        OverriddenRateCoupon(ext::shared_ptr<Coupon> underlyingCoupon,
++                             Handle<Quote> rate)
++        : Coupon(underlyingCoupon->date(), underlyingCoupon->nominal(),
++                 underlyingCoupon->accrualStartDate(), underlyingCoupon->accrualEndDate(),
++                 underlyingCoupon->referencePeriodStart(), underlyingCoupon->referencePeriodEnd(),
++                 underlyingCoupon->exCouponDate()),
++          underlyingCoupon_(std::move(underlyingCoupon)), rate_(std::move(rate)) {
++            QL_REQUIRE(!rate_.empty(), "empty rate quote handle");
++            registerWith(rate_);
++        }
++
++        //! \name CashFlow interface
++        //@{
++        Real amount() const override { return rate() * accrualPeriod() * nominal(); }
++        //@}
++        //! \name Coupon interface
++        //@{
++        Rate rate() const override {
++            QL_REQUIRE(rate_->isValid(), "invalid overridden rate quote");
++            return rate_->value();
++        }
++        DayCounter dayCounter() const override { return underlyingCoupon_->dayCounter(); }
++        Real accruedAmount(const Date& d) const override {
++            if (d <= accrualStartDate() || d > date())
++                return 0.0;
++            return nominal() * rate() *
++                   dayCounter().yearFraction(accrualStartDate(), std::min(d, accrualEndDate()),
++                                             referencePeriodStart(), referencePeriodEnd());
++        }
++        //@}
++
++        //! the wrapped coupon whose rate is overridden
++        const ext::shared_ptr<Coupon>& underlyingCoupon() const { return underlyingCoupon_; }
++
++      private:
++        ext::shared_ptr<Coupon> underlyingCoupon_;
++        Handle<Quote> rate_;
 +    };
 +
 +}
@@ -1576,10 +1714,10 @@ index b724707..8b252a7 100644
  #include <ql/termstructures/yield/spreaddiscountcurve.hpp>
 diff --git a/ql/termstructures/yield/forwardstartingbasisswaphelper.hpp b/ql/termstructures/yield/forwardstartingbasisswaphelper.hpp
 new file mode 100644
-index 0000000..51bf6f3
+index 0000000..e052062
 --- /dev/null
 +++ b/ql/termstructures/yield/forwardstartingbasisswaphelper.hpp
-@@ -0,0 +1,338 @@
+@@ -0,0 +1,374 @@
 +/* -*- mode: c++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
 +
 +/*
@@ -1609,6 +1747,7 @@ index 0000000..51bf6f3
 +
 +#include <ql/cashflows/earlypaymentcoupon.hpp>
 +#include <ql/cashflows/flatratecoupon.hpp>
++#include <ql/cashflows/overriddenratecoupon.hpp>
 +#include <ql/cashflows/iborcoupon.hpp>
 +#include <ql/cashflows/overnightindexedcoupon.hpp>
 +#include <ql/experimental/termstructures/basisswapratehelpers.hpp>
@@ -1678,6 +1817,20 @@ index 0000000..51bf6f3
 +        Coupon::accrualPeriod() is not virtual in QuantLib and so
 +        cannot reflect the flat (non-accrual) definition through the
 +        normal CashFlows::bps() machinery.
++
++        \c firstIborRate (optional) makes the FIRST cash flow of the
++        ibor leg use the rate given by the quote instead of the forward
++        read from the curve being bootstrapped (see
++        ql/cashflows/overriddenratecoupon.hpp). Its amount is
++        rate * accrual period * nominal, the following ibor coupons are
++        forecast from the curve as usual, and it composes with
++        \c iborFlatRatePayment and \c customPaymentDate. Typical use: a
++        spot-starting basis swap whose first Euribor period (spot to
++        spot + 3M) is known or to be fixed to a chosen value.
++        \warning The helper that is meant to pin the curve over that same
++                 period (the stub) must NOT use it: its error would no
++                 longer depend on the curve node and the bootstrap would
++                 be singular.
 +    */
 +    class OvernightIborBasisSwapRateHelperForwardStarting : public RateHelper {
 +      public:
@@ -1704,13 +1857,14 @@ index 0000000..51bf6f3
 +                DayCounter overnightDayCounter = DayCounter(),
 +                DayCounter iborDayCounter = DayCounter(),
 +                bool overnightFlatRatePayment = false,
-+                bool iborFlatRatePayment = false)
++                bool iborFlatRatePayment = false,
++                const Handle<Quote>& firstIborRate = Handle<Quote>())
 +        : RateHelper(basis), startDate_(startDate), endDate_(endDate),
 +          calendar_(std::move(calendar)), convention_(convention), endOfMonth_(endOfMonth),
 +          discountHandle_(std::move(discountHandle)), bootstrapBaseCurve_(bootstrapBaseCurve),
 +          paymentLag_(paymentLag), basisOnIborLeg_(basisOnIborLeg),
 +          overnightFlatRatePayment_(overnightFlatRatePayment),
-+          iborFlatRatePayment_(iborFlatRatePayment) {
++          iborFlatRatePayment_(iborFlatRatePayment), firstIborRate_(firstIborRate) {
 +
 +            QL_REQUIRE(baseIndex, "null base overnight index");
 +            QL_REQUIRE(otherIndex, "null other ibor index");
@@ -1734,6 +1888,7 @@ index 0000000..51bf6f3
 +            registerWith(baseIndex_);
 +            registerWith(otherIndex_);
 +            registerWith(discountHandle_);
++            registerWith(firstIborRate_);
 +
 +            earliestDate_ = startDate_;
 +
@@ -1813,6 +1968,24 @@ index 0000000..51bf6f3
 +            // rate, then early payment) can be composed in either order
 +            ext::shared_ptr<Coupon> baseCashFlow = lastBaseCoupon;
 +            ext::shared_ptr<Coupon> otherCashFlow = lastOtherCoupon;
++
++            // first flow of the ibor leg at a user-supplied rate instead of
++            // the forecast from the curve being bootstrapped. For a
++            // multi-period leg the first coupon is replaced in place; for
++            // a single-period one it is the same cash flow as the last,
++            // and is wrapped here so that the flat-rate / early-payment
++            // wrappers below compose on top of it.
++            if (!firstIborRate_.empty()) {
++                if (otherLeg.size() == 1) {
++                    otherCashFlow = ext::make_shared<OverriddenRateCoupon>(
++                        otherCashFlow, firstIborRate_);
++                } else {
++                    auto firstOtherCoupon =
++                        ext::dynamic_pointer_cast<Coupon>(otherLeg.front());
++                    otherLeg.front() = ext::make_shared<OverriddenRateCoupon>(
++                        firstOtherCoupon, firstIborRate_);
++                }
++            }
 +
 +            if (overnightFlatRatePayment_)
 +                baseCashFlow = ext::make_shared<FlatRateCoupon>(baseCashFlow);
@@ -1909,6 +2082,7 @@ index 0000000..51bf6f3
 +        bool basisOnIborLeg_;
 +        bool overnightFlatRatePayment_;
 +        bool iborFlatRatePayment_;
++        Handle<Quote> firstIborRate_;
 +
 +        ext::shared_ptr<Swap> swap_;
 +        RelinkableHandle<YieldTermStructure> termStructureHandle_;
