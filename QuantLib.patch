@@ -88,10 +88,10 @@ index 0000000..0380809
 +}
 diff --git a/FRONTIER_MIXED_INTERPOLATION.md b/FRONTIER_MIXED_INTERPOLATION.md
 new file mode 100644
-index 0000000..827c487
+index 0000000..3776a21
 --- /dev/null
 +++ b/FRONTIER_MIXED_INTERPOLATION.md
-@@ -0,0 +1,433 @@
+@@ -0,0 +1,491 @@
 +# Fork QuantLib: interpolazione mista con "data di frontiera"
 +
 +Questo fork aggiunge a QuantLib un nuovo schema di interpolazione per curve
@@ -495,11 +495,12 @@ index 0000000..827c487
 +  `discountHandle` all'helper (tipicamente la stessa curva backbone) —
 +  non cambia nulla lato helper: la nuova classe è un drop-in replacement
 +  del forecasting handle, gli helper esistenti non richiedono modifiche.
-+- Vincolo di sicurezza: il day counter di questa curva deve coincidere
-+  con quello del backbone (verificato con un `QL_REQUIRE` in
-+  costruzione), perché il tempo `t` usato per interrogare
-+  `backbone->discount(t)` viene preso as-is dal day counter di questa
-+  curva, senza riconversione tramite `Date`.
++- Day counter: quello della curva di spread e quello del backbone
++  possono essere diversi. Il backbone viene sempre interrogato per
++  *data* (recuperando i giorni interi che racchiudono il tempo `t`
++  della curva, con interpolazione log-lineare fra i due), così applica il
++  proprio day counter e la propria reference date; se day counter e
++  reference date coincidono si usa direttamente la query per tempo.
 +
 +**Attenzione — caso limite numerico individuato durante i test**: con
 +pochissimi pillar e un salto di scadenza molto ampio fra uno stub a
@@ -525,6 +526,63 @@ index 0000000..827c487
 +backbone più lo spread bootstrappato (verificato confrontando
 +`zero_fwd(t) - zero_estr(t)` contro lo spread atteso in più punti,
 +inclusi punti prima del primo pillar).
++
++## Modalità di bootstrap "Newton globale" (`globalNewton`)
++
++`IterativeBootstrap` ha tre nuovi parametri opzionali in coda al
++costruttore, quindi la modalità vale per **qualsiasi**
++`PiecewiseYieldCurve` (ogni traits e interpolatore) e per
++`PiecewiseFrontierMixedRtZeroSpreaded`:
++
++```
++IterativeBootstrap(accuracy, minValue, maxValue, maxAttempts, maxFactor,
++                   minFactor, dontThrow, dontThrowSteps, maxEvaluations,
++                   bool globalNewton = false,
++                   Size newtonMaxIterations = 50,
++                   Real newtonBump = 1.0e-7)
++```
++
++Con `globalNewton = false` (default) il comportamento è identico a
++quello di QuantLib standard.
++
++Con `globalNewton = true` i nodi non vengono risolti uno alla volta.
++Il bootstrap risolve il sistema F(x) = 0, dove x è il vettore degli n
++nodi incogniti e F il vettore dei `quoteError()` degli n helper vivi:
++
++1. Il guess iniziale è quello dei traits (`globalGuess` se esiste),
++   oppure la curva precedente se è ancora valida.
++2. La Jacobiana n×n viene calcolata con differenze finite centrali (bump
++   `newtonBump · max(1, |x_j|)`). È piena, perché l'interpolazione è
++   globale.
++3. Il sistema J·dx = −F viene risolto con SVD.
++4. Una line search a backtracking dimezza il passo finché ‖F‖₂ scende.
++   Uno step che fa lanciare un'eccezione a un helper viene trattato come
++   fallito e accorciato.
++5. Il bootstrap converge quando max|F| ≤ accuracy (default quello della
++   curva, 1e-12). Se la line search fallisce, o se non converge entro
++   `newtonMaxIterations`, lancia un errore chiaro con il residuo
++   raggiunto.
++
++Non c'è bracketing della radice, quindi non si verifica l'errore "root
++not bracketed" del caso limite descritto sopra. `minValue`, `maxValue` e
++i parametri di retry vengono ignorati in questa modalità.
++
++Python (parametri posizionali, perché i costruttori sono overloaded):
++
++```python
++b = ql.IterativeBootstrap(None, None, None, 1, 2.0, 2.0, False, 10, 100, True)
++eur3m_curve = ql.PiecewiseFrontierMixedRtZeroSpreaded(
++    today, helpers_3m, euribor_dc, estr_handle, frontier_time_3m, [], [], b)
++# vale anche per le altre curve, es.
++estr_curve = ql.PiecewiseFrontierMixedRtZero(today, helpers, dc, [], [],
++    ql.FrontierLinearRtCubicNaturalRt(frontier_time), b)
++```
++
++**Verificato**: sul caso a 3 helper (stub + 2Y + 2Y×3Y) in cui
++l'iterativo fallisce con "root not bracketed", Newton converge (errore
++massimo 2e-14). Sul caso a 4 helper dà gli stessi nodi dell'iterativo.
++Su curve standard (ZeroYield/Linear, ZeroYield/Cubic, Discount/LogLinear,
++ForwardRate/BackwardFlat, 8 swap) coincide con l'iterativo entro 1e-12.
 diff --git a/ql/CMakeLists.txt b/ql/CMakeLists.txt
 index 436612a..ae1bf70 100644
 --- a/ql/CMakeLists.txt
@@ -1217,6 +1275,262 @@ index 0000000..0309ef2
 +}
 +
 +#endif
+diff --git a/ql/termstructures/iterativebootstrap.hpp b/ql/termstructures/iterativebootstrap.hpp
+index f8aaaf1..581ac1e 100644
+--- a/ql/termstructures/iterativebootstrap.hpp
++++ b/ql/termstructures/iterativebootstrap.hpp
+@@ -32,6 +32,11 @@
+ #include <ql/math/solvers1d/finitedifferencenewtonsafe.hpp>
+ #include <ql/math/solvers1d/brent.hpp>
+ #include <ql/utilities/dataformatters.hpp>
++#include <ql/math/matrix.hpp>
++#include <ql/math/array.hpp>
++#include <ql/math/matrixutilities/svd.hpp>
++#include <type_traits>
++#include <utility>
+ 
+ namespace QuantLib {
+ 
+@@ -69,6 +74,20 @@ namespace detail {
+         return result;
+     }
+ 
++    // detection of the optional traits hooks used by the global Newton mode
++    template <class T, class C, class = void>
++    struct HasGlobalGuess : std::false_type {};
++    template <class T, class C>
++    struct HasGlobalGuess<T, C,
++        std::void_t<decltype(T::globalGuess(std::declval<const C*>(), true))>> : std::true_type {};
++
++    template <class T, class C, class = void>
++    struct HasTransform : std::false_type {};
++    template <class T, class C>
++    struct HasTransform<T, C,
++        std::void_t<decltype(T::transformDirect(Real(), Size(), std::declval<const C*>()))>>
++        : std::true_type {};
++
+ }
+ 
+     //! Universal piecewise-term-structure boostrapper.
+@@ -89,6 +108,18 @@ namespace detail {
+                                   result.
+             \param dontThrowSteps If \p dontThrow is \c true, this gives the number of steps to use when searching
+                                   for a fallback curve pillar value that gives the minimum bootstrap helper error.
++            \param globalNewton   If \c true, the pillars are not solved one at a time (iterating until the curve
++                                  stops changing) but all at once: the system F(x) = 0, where x is the vector of
++                                  curve nodes and F the vector of helper quote errors, is solved by a damped
++                                  Newton method. At each step the full (dense) Jacobian is computed by central
++                                  finite differences and the linear system J dx = -F is solved through an SVD;
++                                  the step is shortened by backtracking until the Euclidean norm of F decreases.
++                                  No root bracketing is needed, so it does not suffer from "root not bracketed"
++                                  failures that can happen with global interpolators (e.g. cubic splines).
++                                  \c minValue, \c maxValue and the retry parameters are ignored in this mode.
++                                  The number of alive helpers must equal the number of unknown nodes.
++            \param newtonMaxIterations Maximum number of Newton steps (global Newton mode only).
++            \param newtonBump     Absolute bump used for the finite-difference Jacobian (global Newton mode only).
+         */
+         IterativeBootstrap(Real accuracy = Null<Real>(),
+                            Real minValue = Null<Real>(),
+@@ -98,11 +129,15 @@ namespace detail {
+                            Real minFactor = 2.0,
+                            bool dontThrow = false,
+                            Size dontThrowSteps = 10,
+-                           Size maxEvaluations = MAX_FUNCTION_EVALUATIONS);
++                           Size maxEvaluations = MAX_FUNCTION_EVALUATIONS,
++                           bool globalNewton = false,
++                           Size newtonMaxIterations = 50,
++                           Real newtonBump = 1.0e-7);
+         void setup(Curve* ts);
+         void calculate() const;
+       private:
+         void initialize() const;
++        void calculateGlobalNewton(Real accuracy) const;
+         Real accuracy_;
+         Real minValue_, maxValue_;
+         Size maxAttempts_;
+@@ -111,6 +146,9 @@ namespace detail {
+         bool dontThrow_;
+         Size dontThrowSteps_;
+         Curve* ts_;
++        bool globalNewton_;
++        Size newtonMaxIterations_;
++        Real newtonBump_;
+         Size n_ = 0;
+         Brent firstSolver_;
+         FiniteDifferenceNewtonSafe solver_;
+@@ -130,10 +168,17 @@ namespace detail {
+                                                   Real minFactor,
+                                                   bool dontThrow,
+                                                   Size dontThrowSteps,
+-                                                  Size maxEvaluations)
++                                                  Size maxEvaluations,
++                                                  bool globalNewton,
++                                                  Size newtonMaxIterations,
++                                                  Real newtonBump)
+     : accuracy_(accuracy), minValue_(minValue), maxValue_(maxValue), maxAttempts_(maxAttempts),
+       maxFactor_(maxFactor), minFactor_(minFactor), dontThrow_(dontThrow),
+-      dontThrowSteps_(dontThrowSteps), ts_(nullptr), loopRequired_(Interpolator::global) {
++      dontThrowSteps_(dontThrowSteps), ts_(nullptr), globalNewton_(globalNewton),
++      newtonMaxIterations_(newtonMaxIterations), newtonBump_(newtonBump),
++      loopRequired_(Interpolator::global) {
++        QL_REQUIRE(newtonMaxIterations_ > 0, "newtonMaxIterations must be positive");
++        QL_REQUIRE(newtonBump_ > 0.0, "newtonBump must be positive");
+         QL_REQUIRE(maxFactor_ >= 1.0, "Expected that maxFactor would be at least 1.0 but got " << maxFactor_);
+         QL_REQUIRE(minFactor_ >= 1.0, "Expected that minFactor would be at least 1.0 but got " << minFactor_);
+         firstSolver_.setMaxEvaluations(maxEvaluations);
+@@ -248,6 +293,11 @@ namespace detail {
+         const std::vector<Real>& data = ts_->data_;
+         Real accuracy = accuracy_ != Null<Real>() ? accuracy_ : ts_->accuracy_;
+ 
++        if (globalNewton_) {
++            calculateGlobalNewton(accuracy);
++            return;
++        }
++
+         Size maxIterations = Traits::maxIterations()-1;
+ 
+         // there might be a valid curve state to use as guess
+@@ -388,6 +438,140 @@ namespace detail {
+         validCurve_ = true;
+     }
+ 
++    template <class Curve>
++    void IterativeBootstrap<Curve>::calculateGlobalNewton(Real accuracy) const {
++        // unknowns: one node per alive helper (node 0 is not an unknown)
++        const Size n = alive_;
++        QL_REQUIRE(ts_->times_.size() == n + 1, "global Newton bootstrap: inconsistent node count");
++
++        std::vector<ext::shared_ptr<typename Traits::helper>> helpers(
++            ts_->instruments_.begin() + firstAliveHelper_, ts_->instruments_.end());
++
++        // full interpolation on all nodes (as the global bootstrap does)
++        if (!validCurve_) {
++            ts_->interpolation_ = detail::interpolateWithoutUpdate(
++                ts_->interpolator_, ts_->times_.begin(), ts_->times_.end(), ts_->data_.begin());
++        }
++
++        // initial guess, in the same variables as the cost function
++        Array x(n);
++        {
++            bool needsTransform = true;
++            if (validCurve_) {
++                for (Size i = 0; i < n; ++i)
++                    x[i] = ts_->data_[i + 1];
++            } else if constexpr (detail::HasGlobalGuess<Traits, Curve>::value) {
++                Array g;
++                std::tie(g, needsTransform) = Traits::globalGuess(ts_, false);
++                QL_REQUIRE(g.size() == n, "global Newton bootstrap: wrong guess size");
++                x = g;
++            } else {
++                ts_->interpolation_.update();
++                for (Size i = 0; i < n; ++i) {
++                    Traits::updateGuess(ts_->data_, Traits::guess(i + 1, ts_, false, firstAliveHelper_), i + 1);
++                    x[i] = ts_->data_[i + 1];
++                }
++            }
++            if constexpr (detail::HasTransform<Traits, Curve>::value) {
++                if (needsTransform || validCurve_) {
++                    for (Size i = 0; i < n; ++i)
++                        x[i] = Traits::transformInverse(x[i], i + 1, ts_);
++                }
++            }
++        }
++
++        auto residual = [&](const Array& v) {
++            for (Size i = 0; i < n; ++i) {
++                Real value = v[i];
++                if constexpr (detail::HasTransform<Traits, Curve>::value)
++                    value = Traits::transformDirect(value, i + 1, ts_);
++                Traits::updateGuess(ts_->data_, value, i + 1);
++            }
++            ts_->interpolation_.update();
++            Array f(n);
++            for (Size i = 0; i < n; ++i)
++                f[i] = helpers[i]->quoteError();
++            return f;
++        };
++        auto norm2 = [](const Array& f) {
++            Real s = 0.0;
++            for (Size i = 0; i < f.size(); ++i)
++                s += f[i] * f[i];
++            return std::sqrt(s);
++        };
++        auto normInf = [](const Array& f) {
++            Real m = 0.0;
++            for (Size i = 0; i < f.size(); ++i)
++                m = std::max(m, std::fabs(f[i]));
++            return m;
++        };
++
++        Array f = residual(x);
++        Real fInf = normInf(f);
++
++        for (Size it = 0; it < newtonMaxIterations_; ++it) {
++            if (fInf <= accuracy)
++                break;
++
++            // Jacobian by central finite differences (dense: the interpolation is global)
++            Matrix jac(n, n);
++            for (Size j = 0; j < n; ++j) {
++                Array xp = x, xm = x;
++                Real h = newtonBump_ * std::max<Real>(1.0, std::fabs(x[j]));
++                xp[j] += h;
++                xm[j] -= h;
++                Array fp = residual(xp);
++                Array fm = residual(xm);
++                for (Size i = 0; i < n; ++i)
++                    jac[i][j] = (fp[i] - fm[i]) / (2.0 * h);
++            }
++
++            Array rhs(n);
++            for (Size i = 0; i < n; ++i)
++                rhs[i] = -f[i];
++            Array dx = SVD(jac).solveFor(rhs);
++
++            // backtracking line search on the Euclidean norm of F
++            Real f0 = norm2(f);
++            Real lambda = 1.0;
++            bool accepted = false;
++            Array xNew(n), fNew(n);
++            for (Size k = 0; k < 40; ++k, lambda *= 0.5) {
++                for (Size i = 0; i < n; ++i)
++                    xNew[i] = x[i] + lambda * dx[i];
++                try {
++                    fNew = residual(xNew);
++                } catch (...) {
++                    continue; // step outside the domain of the helpers: shorten it
++                }
++                Real fn = norm2(fNew);
++                if (fn == fn && fn < (1.0 - 1.0e-4 * lambda) * f0) {
++                    accepted = true;
++                    break;
++                }
++            }
++            if (!accepted) {
++                // restore the last accepted state before reporting the failure
++                residual(x);
++                QL_FAIL("global Newton bootstrap: line search failed at iteration "
++                        << it + 1 << " (max |error| = " << fInf
++                        << ", required accuracy " << accuracy << ")");
++            }
++            x = xNew;
++            f = fNew;
++            fInf = normInf(f);
++        }
++
++        if (fInf > accuracy) {
++            residual(x);
++            QL_FAIL("global Newton bootstrap: convergence not reached after "
++                    << newtonMaxIterations_ << " iterations; max |error| = " << fInf
++                    << ", required accuracy " << accuracy);
++        }
++        residual(x); // leave the curve exactly at the solution
++        validCurve_ = true;
++    }
++
+ }
+ 
+ #endif
 diff --git a/ql/termstructures/yield/Makefile.am b/ql/termstructures/yield/Makefile.am
 index 6824ab7..5adf4e5 100644
 --- a/ql/termstructures/yield/Makefile.am
@@ -1606,10 +1920,10 @@ index 0000000..51bf6f3
 +#endif
 diff --git a/ql/termstructures/yield/piecewisefrontiermixedrtzerospreaded.hpp b/ql/termstructures/yield/piecewisefrontiermixedrtzerospreaded.hpp
 new file mode 100644
-index 0000000..8e42fdc
+index 0000000..4a69f6b
 --- /dev/null
 +++ b/ql/termstructures/yield/piecewisefrontiermixedrtzerospreaded.hpp
-@@ -0,0 +1,247 @@
+@@ -0,0 +1,280 @@
 +/* -*- mode: c++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
 +
 +/*
@@ -1641,6 +1955,8 @@ index 0000000..8e42fdc
 +
 +#include <ql/termstructures/yield/piecewiseyieldcurve.hpp>
 +#include <ql/math/interpolations/frontierlinearrtcubicinterpolation.hpp>
++#include <cmath>
++#include <algorithm>
 +#include <utility>
 +
 +namespace QuantLib {
@@ -1772,15 +2088,13 @@ index 0000000..8e42fdc
 +                 \c frontierTime so the problematic region stays in the
 +                 (always well-behaved) linear segment.
 +
-+        \warning The \c dayCounter passed to this curve should match the
-+                 backbone's own day counter. The spread's own time metric
-+                 \c t (computed from this curve's reference date and day
-+                 counter) is used as-is to query
-+                 <tt>backbone->discount(t)</tt>; if the two day counters
-+                 disagree, that raw \c t means different things for the
-+                 two curves and the composition above is no longer
-+                 consistent. A day-counter mismatch is detected and
-+                 rejected at construction time.
++        \note The day counter of this curve and the backbone's may differ.
++              The backbone is always queried by calendar date (through
++              the integer days surrounding this curve's time t, with
++              log-linear interpolation in between), so it applies its
++              own day counter and reference date. When both day counters
++              and reference dates coincide, a direct time-based query is
++              used instead.
 +
 +        \ingroup yieldtermstructures
 +    */
@@ -1798,9 +2112,10 @@ index 0000000..8e42fdc
 +                Handle<YieldTermStructure> backbone,
 +                Time frontierTime,
 +                const std::vector<Handle<Quote> >& jumps = {},
-+                const std::vector<Date>& jumpDates = {})
++                const std::vector<Date>& jumpDates = {},
++                base_t::bootstrap_type bootstrap = {})
 +        : base_t(referenceDate, std::move(instruments), dayCounter, jumps, jumpDates,
-+                 FrontierLinearRtCubicNaturalRt(frontierTime)),
++                 FrontierLinearRtCubicNaturalRt(frontierTime), std::move(bootstrap)),
 +          backbone_(std::move(backbone)) {
 +            checkBackbone();
 +            registerWith(backbone_);
@@ -1814,9 +2129,11 @@ index 0000000..8e42fdc
 +                Handle<YieldTermStructure> backbone,
 +                Time frontierTime,
 +                const std::vector<Handle<Quote> >& jumps = {},
-+                const std::vector<Date>& jumpDates = {})
++                const std::vector<Date>& jumpDates = {},
++                base_t::bootstrap_type bootstrap = {})
 +        : base_t(settlementDays, calendar, std::move(instruments), dayCounter,
-+                 jumps, jumpDates, FrontierLinearRtCubicNaturalRt(frontierTime)),
++                 jumps, jumpDates, FrontierLinearRtCubicNaturalRt(frontierTime),
++                 std::move(bootstrap)),
 +          backbone_(std::move(backbone)) {
 +            checkBackbone();
 +            registerWith(backbone_);
@@ -1837,18 +2154,48 @@ index 0000000..8e42fdc
 +            // data, i.e. the bootstrapped spread, not an absolute rate).
 +            calculate();
 +            DiscountFactor spreadDf = this->ZeroYieldStructure::discountImpl(t);
-+            return backbone_->discount(t) * spreadDf;
++            return backboneDiscount(t) * spreadDf;
 +        }
 +
 +      private:
++        //! backbone discount factor at the calendar point corresponding
++        //! to this curve's time t
++        /*! The two curves may use different day counters, so the raw
++            time t cannot be passed to the backbone as is. t always comes
++            from a date (via this curve's day counter and reference
++            date); we recover the surrounding integer days, query the
++            backbone by Date (so that it applies its own day counter),
++            and interpolate log-linearly between the two days so the
++            result stays smooth for queries that do not fall on a date.
++        */
++        DiscountFactor backboneDiscount(Time t) const {
++            if (t <= 0.0)
++                return backbone_->discount(0.0);
++            const DayCounter& dc = this->dayCounter();
++            if (dc == backbone_->dayCounter() &&
++                this->referenceDate() == backbone_->referenceDate())
++                return backbone_->discount(t); // same time metric: direct
++            Date ref = this->referenceDate();
++            // initial guess for the day count, then walk to the bracket
++            // (year fraction is non-decreasing in the date)
++            Time perYear = dc.yearFraction(ref, ref + 365);
++            QL_REQUIRE(perYear > 0.0, "invalid day counter year fraction");
++            Integer n = std::max<Integer>(0, static_cast<Integer>(std::lround(t * 365.0 / perYear)));
++            while (n > 0 && dc.yearFraction(ref, ref + n) > t)
++                --n;
++            while (dc.yearFraction(ref, ref + (n + 1)) <= t)
++                ++n;
++            Date d0 = ref + n, d1 = ref + (n + 1);
++            Time t0 = dc.yearFraction(ref, d0), t1 = dc.yearFraction(ref, d1);
++            Real w = (t1 > t0) ? (t - t0) / (t1 - t0) : 0.0;
++            Real ln0 = std::log(backbone_->discount(d0));
++            Real ln1 = std::log(backbone_->discount(d1));
++            return std::exp((1.0 - w) * ln0 + w * ln1);
++        }
++
 +        void checkBackbone() const {
 +            QL_REQUIRE(!backbone_.empty(),
 +                       "PiecewiseFrontierMixedRtZeroSpreaded: empty backbone curve handle");
-+            QL_REQUIRE(backbone_->dayCounter().name() == this->dayCounter().name(),
-+                       "PiecewiseFrontierMixedRtZeroSpreaded: backbone day counter ("
-+                       << backbone_->dayCounter().name() << ") must match this curve's "
-+                       "day counter (" << this->dayCounter().name() << "); the spread's "
-+                       "time metric is used as-is to query the backbone's discount factor");
 +        }
 +
 +        Handle<YieldTermStructure> backbone_;

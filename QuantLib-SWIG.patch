@@ -75,10 +75,60 @@ index 615d8fc..0adc610 100644
  using QuantLib::RichardsonExtrapolation;
  %}
 diff --git a/SWIG/piecewiseyieldcurve.i b/SWIG/piecewiseyieldcurve.i
-index a7121b6..5b50c55 100644
+index a7121b6..9df3164 100644
 --- a/SWIG/piecewiseyieldcurve.i
 +++ b/SWIG/piecewiseyieldcurve.i
-@@ -180,6 +180,57 @@ export_piecewise_curve(PiecewiseParabolicCubicZero,ZeroYield,ParabolicCubic);
+@@ -42,6 +42,9 @@ struct _IterativeBootstrap {
+     Real maxFactor, minFactor;
+     bool dontThrow;
+     Size dontThrowSteps, maxEvaluations;
++    bool globalNewton;
++    Size newtonMaxIterations;
++    Real newtonBump;
+     _IterativeBootstrap(double accuracy = Null<double>(),
+                         double minValue = Null<double>(),
+                         double maxValue = Null<double>(),
+@@ -50,11 +53,15 @@ struct _IterativeBootstrap {
+                         Real minFactor = 2.0,
+                         bool dontThrow = false,
+                         Size dontThrowSteps = 10,
+-                        Size maxEvaluations = 100)
++                        Size maxEvaluations = 100,
++                        bool globalNewton = false,
++                        Size newtonMaxIterations = 50,
++                        Real newtonBump = 1.0e-7)
+     : accuracy(accuracy), minValue(minValue), maxValue(maxValue),
+       maxAttempts(maxAttempts), maxFactor(maxFactor), minFactor(minFactor),
+       dontThrow(dontThrow), dontThrowSteps(dontThrowSteps),
+-      maxEvaluations(maxEvaluations) {}
++      maxEvaluations(maxEvaluations), globalNewton(globalNewton),
++      newtonMaxIterations(newtonMaxIterations), newtonBump(newtonBump) {}
+ };
+ 
+ template <class PiecewiseYieldCurve>
+@@ -63,7 +70,8 @@ inline typename PiecewiseYieldCurve::bootstrap_type make_bootstrap(const _Iterat
+         b.accuracy, b.minValue, b.maxValue,
+         b.maxAttempts, b.maxFactor, b.minFactor,
+         b.dontThrow, b.dontThrowSteps,
+-        b.maxEvaluations
++        b.maxEvaluations,
++        b.globalNewton, b.newtonMaxIterations, b.newtonBump
+     };
+ }
+ %}
+@@ -81,7 +89,10 @@ struct _IterativeBootstrap {
+                         Real minFactor = 2.0,
+                         bool dontThrow = false,
+                         Size dontThrowSteps = 10,
+-                        Size maxEvaluations = 100);
++                        Size maxEvaluations = 100,
++                        bool globalNewton = false,
++                        Size newtonMaxIterations = 50,
++                        Real newtonBump = 1.0e-7);
+ };
+ 
+ /* We have to resort to a macro, because the R implementation of shared_ptr
+@@ -180,6 +191,71 @@ export_piecewise_curve(PiecewiseParabolicCubicZero,ZeroYield,ParabolicCubic);
  export_piecewise_curve(PiecewiseMonotonicParabolicCubicZero,ZeroYield,MonotonicParabolicCubic);
  export_piecewise_curve(PiecewiseLogParabolicCubicDiscount,Discount,LogParabolicCubic);
  export_piecewise_curve(PiecewiseMonotonicLogParabolicCubicDiscount,Discount,MonotonicLogParabolicCubic);
@@ -103,22 +153,36 @@ index a7121b6..5b50c55 100644
 +    #if !defined(SWIGJAVA) && !defined(SWIGCSHARP)
 +    %feature("kwargs") PiecewiseFrontierMixedRtZeroSpreaded;
 +    #endif
-+    PiecewiseFrontierMixedRtZeroSpreaded(
-+        const Date& referenceDate,
-+        const std::vector<ext::shared_ptr<RateHelper> >& instruments,
-+        const DayCounter& dayCounter,
-+        const Handle<YieldTermStructure>& backbone,
-+        Time frontierTime,
-+        const std::vector<Handle<Quote> >& jumps = std::vector<Handle<Quote> >(),
-+        const std::vector<Date>& jumpDates = std::vector<Date>());
-+    PiecewiseFrontierMixedRtZeroSpreaded(
-+        Integer settlementDays, const Calendar& calendar,
-+        const std::vector<ext::shared_ptr<RateHelper> >& instruments,
-+        const DayCounter& dayCounter,
-+        const Handle<YieldTermStructure>& backbone,
-+        Time frontierTime,
-+        const std::vector<Handle<Quote> >& jumps = std::vector<Handle<Quote> >(),
-+        const std::vector<Date>& jumpDates = std::vector<Date>());
++    %extend {
++        PiecewiseFrontierMixedRtZeroSpreaded(
++            const Date& referenceDate,
++            const std::vector<ext::shared_ptr<RateHelper> >& instruments,
++            const DayCounter& dayCounter,
++            const Handle<YieldTermStructure>& backbone,
++            Time frontierTime,
++            const std::vector<Handle<Quote> >& jumps = std::vector<Handle<Quote> >(),
++            const std::vector<Date>& jumpDates = std::vector<Date>(),
++            const _IterativeBootstrap& b = _IterativeBootstrap()) {
++            return new PiecewiseFrontierMixedRtZeroSpreaded(
++                referenceDate, instruments, dayCounter, backbone, frontierTime,
++                jumps, jumpDates,
++                make_bootstrap<PiecewiseFrontierMixedRtZeroSpreaded>(b));
++        }
++        PiecewiseFrontierMixedRtZeroSpreaded(
++            Integer settlementDays, const Calendar& calendar,
++            const std::vector<ext::shared_ptr<RateHelper> >& instruments,
++            const DayCounter& dayCounter,
++            const Handle<YieldTermStructure>& backbone,
++            Time frontierTime,
++            const std::vector<Handle<Quote> >& jumps = std::vector<Handle<Quote> >(),
++            const std::vector<Date>& jumpDates = std::vector<Date>(),
++            const _IterativeBootstrap& b = _IterativeBootstrap()) {
++            return new PiecewiseFrontierMixedRtZeroSpreaded(
++                settlementDays, calendar, instruments, dayCounter, backbone, frontierTime,
++                jumps, jumpDates,
++                make_bootstrap<PiecewiseFrontierMixedRtZeroSpreaded>(b));
++        }
++    }
 +
 +    const Handle<YieldTermStructure>& backboneCurve() const;
 +
