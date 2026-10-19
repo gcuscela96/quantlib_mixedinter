@@ -88,10 +88,10 @@ index 0000000..0380809
 +}
 diff --git a/FRONTIER_MIXED_INTERPOLATION.md b/FRONTIER_MIXED_INTERPOLATION.md
 new file mode 100644
-index 0000000..30ca5b7
+index 0000000..0c137d1
 --- /dev/null
 +++ b/FRONTIER_MIXED_INTERPOLATION.md
-@@ -0,0 +1,528 @@
+@@ -0,0 +1,562 @@
 +# Fork QuantLib: interpolazione mista con "data di frontiera"
 +
 +Questo fork aggiunge a QuantLib un nuovo schema di interpolazione per curve
@@ -620,14 +620,49 @@ index 0000000..30ca5b7
 +- Per gli swap spot-starting usa questo helper con `startDate = spot` al
 +  posto di `OvernightIborBasisSwapRateHelper` nativo, che non ha il
 +  parametro.
++
++## Forward Euribor sulle date dell'indice, year fraction dello strumento (`iborCalculationOnIndexTenor`)
++
++Nuovo parametro booleano dell'helper `OvernightIborBasisSwapRateHelperForwardStarting`
++(in coda, dopo `firstIborRate`). Con `iborCalculationOnIndexTenor=True`
++ogni cedola Euribor:
++
++- prende i discount factor alle date dell'indice, `s` e `s + T` (T =
++  tenor dell'`IborIndex` passato, es. 3M per `Euribor3M`, data calcolata
++  con `index.maturityDate(s)`);
++- li trasforma in tasso con la year fraction dello strumento, la stessa
++  della gamba ESTR:
++
++  F = ( df_F(s) / df_F(s+T) − 1 ) / τ(s, e)
++
++- paga `F · τ(s, e) · N = N · ( df_F(s)/df_F(s+T) − 1 )`.
++
++Il flag forza le cedole indicizzate (`useIndexedCoupons=False` esplicito
++lancia un errore). Implementato dal coupon `DecoupledAccrualIborCoupon`
++(`ql/cashflows/decoupledaccrualiborcoupon.hpp`), che riscala il tasso
++della cedola indicizzata per τ(s, s+T)/τ(s, e). Un fixing già noto
++(`hasFixed()`) viene restituito senza riscalare. Si compone con
++`firstIborRate`, `iborFlatRatePayment` e `customPaymentDate`.
++
++```python
++h = ql.OvernightIborBasisSwapRateHelperForwardStarting(
++    start, end, quote, calendar, ql.ModifiedFollowing, False,
++    estr, euribor3m, estr_handle, False,
++    iborCalculationOnIndexTenor=True)
++```
++
++Verificato in C++: su uno strumento 16/12/2026 → 03/02/2027 (τ = 49/360)
++la cedola vale esattamente (df(16/12/2026)/df(16/03/2027) − 1)/τ e il
++bootstrap Newton riprezza tutti gli helper con errore 2e-15.
 diff --git a/ql/CMakeLists.txt b/ql/CMakeLists.txt
-index 436612a..841110c 100644
+index 436612a..1d01b6b 100644
 --- a/ql/CMakeLists.txt
 +++ b/ql/CMakeLists.txt
-@@ -1007,8 +1007,11 @@ set(QL_HEADERS
+@@ -1007,8 +1007,12 @@ set(QL_HEADERS
      cashflows/digitaliborcoupon.hpp
      cashflows/dividend.hpp
      cashflows/duration.hpp
++    cashflows/decoupledaccrualiborcoupon.hpp
 +    cashflows/earlypaymentcoupon.hpp
      cashflows/equitycashflow.hpp
      cashflows/fixedratecoupon.hpp
@@ -636,7 +671,7 @@ index 436612a..841110c 100644
      cashflows/floatingratecoupon.hpp
      cashflows/iborcoupon.hpp
      cashflows/indexedcashflow.hpp
-@@ -1514,6 +1517,7 @@ set(QL_HEADERS
+@@ -1514,6 +1518,7 @@ set(QL_HEADERS
      math/interpolations/flatextrapolation.hpp
      math/interpolations/flatextrapolation2d.hpp
      math/interpolations/forwardflatinterpolation.hpp
@@ -644,7 +679,7 @@ index 436612a..841110c 100644
      math/interpolations/interpolation2d.hpp
      math/interpolations/kernelinterpolation.hpp
      math/interpolations/kernelinterpolation2d.hpp
-@@ -2210,6 +2214,7 @@ set(QL_HEADERS
+@@ -2210,6 +2215,7 @@ set(QL_HEADERS
      termstructures/yield/flatforward.hpp
      termstructures/yield/forwardcurve.hpp
      termstructures/yield/forwardspreadedtermstructure.hpp
@@ -652,7 +687,7 @@ index 436612a..841110c 100644
      termstructures/yield/forwardstructure.hpp
      termstructures/yield/impliedtermstructure.hpp
      termstructures/yield/interpolatedsimplezerocurve.hpp
-@@ -2218,9 +2223,11 @@ set(QL_HEADERS
+@@ -2218,9 +2224,11 @@ set(QL_HEADERS
      termstructures/yield/oisratehelper.hpp
      termstructures/yield/overnightindexfutureratehelper.hpp
      termstructures/yield/piecewisespreadyieldcurve.hpp
@@ -665,13 +700,14 @@ index 436612a..841110c 100644
      termstructures/yield/spreadbootstraptraits.hpp
      termstructures/yield/spreaddiscountcurve.hpp
 diff --git a/ql/cashflows/Makefile.am b/ql/cashflows/Makefile.am
-index b35ad9d..750ea74 100644
+index b35ad9d..bd50ed1 100644
 --- a/ql/cashflows/Makefile.am
 +++ b/ql/cashflows/Makefile.am
-@@ -21,8 +21,11 @@ this_include_HEADERS = \
+@@ -21,8 +21,12 @@ this_include_HEADERS = \
      digitaliborcoupon.hpp \
      dividend.hpp \
      duration.hpp \
++    decoupledaccrualiborcoupon.hpp \
 +    earlypaymentcoupon.hpp \
      equitycashflow.hpp \
      fixedratecoupon.hpp \
@@ -681,13 +717,14 @@ index b35ad9d..750ea74 100644
      iborcoupon.hpp \
      indexedcashflow.hpp \
 diff --git a/ql/cashflows/all.hpp b/ql/cashflows/all.hpp
-index 124b93b..f0fb9ed 100644
+index 124b93b..36f9ce4 100644
 --- a/ql/cashflows/all.hpp
 +++ b/ql/cashflows/all.hpp
-@@ -18,8 +18,11 @@
+@@ -18,8 +18,12 @@
  #include <ql/cashflows/digitaliborcoupon.hpp>
  #include <ql/cashflows/dividend.hpp>
  #include <ql/cashflows/duration.hpp>
++#include <ql/cashflows/decoupledaccrualiborcoupon.hpp>
 +#include <ql/cashflows/earlypaymentcoupon.hpp>
  #include <ql/cashflows/equitycashflow.hpp>
  #include <ql/cashflows/fixedratecoupon.hpp>
@@ -696,6 +733,120 @@ index 124b93b..f0fb9ed 100644
  #include <ql/cashflows/floatingratecoupon.hpp>
  #include <ql/cashflows/iborcoupon.hpp>
  #include <ql/cashflows/indexedcashflow.hpp>
+diff --git a/ql/cashflows/decoupledaccrualiborcoupon.hpp b/ql/cashflows/decoupledaccrualiborcoupon.hpp
+new file mode 100644
+index 0000000..624a488
+--- /dev/null
++++ b/ql/cashflows/decoupledaccrualiborcoupon.hpp
+@@ -0,0 +1,108 @@
++/* -*- mode: c++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
++
++/*
++ This file is part of a fork of QuantLib intended to add support for an
++ ibor coupon whose forward is computed from discount factors on the
++ index tenor (start to start + index tenor) but divided by the coupon's
++ own accrual year fraction (start to end).
++
++ QuantLib is free software: you can redistribute it and/or modify it
++ under the terms of the QuantLib license.  You should have received a
++ copy of the license along with this program; if not, please email
++ <quantlib-dev@lists.sf.net>. The license is also available online at
++ <https://www.quantlib.org/license.shtml>.
++
++ This program is distributed in the hope that it will be useful, but WITHOUT
++ ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
++ FOR A PARTICULAR PURPOSE.  See the license for more details.
++*/
++
++/*! \file decoupledaccrualiborcoupon.hpp
++    \brief ibor coupon with the forward's discount dates decoupled from
++           the year fraction used to turn them into a rate
++*/
++
++#ifndef quantlib_decoupled_accrual_ibor_coupon_hpp
++#define quantlib_decoupled_accrual_ibor_coupon_hpp
++
++#include <ql/cashflows/iborcoupon.hpp>
++#include <utility>
++
++namespace QuantLib {
++
++    //! Ibor coupon with forward dates and year fraction decoupled
++    /*! A standard indexed IborCoupon forecasts
++
++        \f[ F = \frac{df(s)/df(s+T) - 1}{\tau_{index}(s, s+T)} \f]
++
++        (s = fixing value date, T = index tenor) and pays
++        \f$ F \cdot \tau_{acc}(s, e) \cdot N \f$ over its accrual period
++        (s, e). This coupon keeps the discount-factor dates of the index
++        (s and s+T) but uses the coupon's own accrual year fraction as the
++        denominator:
++
++        \f[ F' = \frac{df(s)/df(s+T) - 1}{\tau_{acc}(s, e)} \f]
++
++        so that the year fraction is the same as in the other leg of the
++        swap, and the amount is simply
++        \f$ (df(s)/df(s+T) - 1) \cdot N \f$.
++
++        Implemented by rescaling the wrapped indexed coupon's rate by
++        \f$ \tau_{index} / \tau_{acc} \f$. The wrapped coupon must be an
++        indexed one (fixingEndDate = index maturity); for a par coupon
++        the two year fractions coincide and nothing changes. A fixing that
++        is already known (hasFixed()) is returned unscaled.
++    */
++    class DecoupledAccrualIborCoupon : public Coupon {
++      public:
++        explicit DecoupledAccrualIborCoupon(ext::shared_ptr<IborCoupon> underlying)
++        : Coupon(underlying->date(), underlying->nominal(),
++                 underlying->accrualStartDate(), underlying->accrualEndDate(),
++                 underlying->referencePeriodStart(), underlying->referencePeriodEnd(),
++                 underlying->exCouponDate()),
++          underlying_(std::move(underlying)) {
++            registerWith(underlying_);
++        }
++
++        //! \name CashFlow interface
++        //@{
++        Real amount() const override { return rate() * accrualPeriod() * nominal(); }
++        //@}
++        //! \name Coupon interface
++        //@{
++        Rate rate() const override {
++            Rate r = underlying_->rate();
++            if (underlying_->hasFixed())
++                return r;
++            Time tauAccrual = accrualPeriod();
++            QL_REQUIRE(tauAccrual > 0.0, "null accrual period");
++            return r * underlying_->spanningTime() / tauAccrual;
++        }
++        DayCounter dayCounter() const override { return underlying_->dayCounter(); }
++        Real accruedAmount(const Date& d) const override {
++            if (d <= accrualStartDate() || d > date())
++                return 0.0;
++            return amount() *
++                   dayCounter().yearFraction(accrualStartDate(), std::min(d, accrualEndDate()),
++                                             referencePeriodStart(), referencePeriodEnd()) /
++                   accrualPeriod();
++        }
++        //@}
++        //! \name Observer interface
++        //@{
++        //! see EarlyPaymentCoupon::deepUpdate() for why this matters during bootstrapping
++        void deepUpdate() override {
++            underlying_->deepUpdate();
++            update();
++        }
++        //@}
++
++        const ext::shared_ptr<IborCoupon>& underlyingCoupon() const { return underlying_; }
++
++      private:
++        ext::shared_ptr<IborCoupon> underlying_;
++    };
++
++}
++
++#endif
 diff --git a/ql/cashflows/earlypaymentcoupon.hpp b/ql/cashflows/earlypaymentcoupon.hpp
 new file mode 100644
 index 0000000..0c44855
@@ -1714,10 +1865,10 @@ index b724707..8b252a7 100644
  #include <ql/termstructures/yield/spreaddiscountcurve.hpp>
 diff --git a/ql/termstructures/yield/forwardstartingbasisswaphelper.hpp b/ql/termstructures/yield/forwardstartingbasisswaphelper.hpp
 new file mode 100644
-index 0000000..e052062
+index 0000000..6eb7c0b
 --- /dev/null
 +++ b/ql/termstructures/yield/forwardstartingbasisswaphelper.hpp
-@@ -0,0 +1,374 @@
+@@ -0,0 +1,395 @@
 +/* -*- mode: c++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
 +
 +/*
@@ -1748,6 +1899,7 @@ index 0000000..e052062
 +#include <ql/cashflows/earlypaymentcoupon.hpp>
 +#include <ql/cashflows/flatratecoupon.hpp>
 +#include <ql/cashflows/overriddenratecoupon.hpp>
++#include <ql/cashflows/decoupledaccrualiborcoupon.hpp>
 +#include <ql/cashflows/iborcoupon.hpp>
 +#include <ql/cashflows/overnightindexedcoupon.hpp>
 +#include <ql/experimental/termstructures/basisswapratehelpers.hpp>
@@ -1827,6 +1979,12 @@ index 0000000..e052062
 +        \c iborFlatRatePayment and \c customPaymentDate. Typical use: a
 +        spot-starting basis swap whose first Euribor period (spot to
 +        spot + 3M) is known or to be fixed to a chosen value.
++        \c iborCalculationOnIndexTenor decouples, on the ibor leg, the
++        dates of the discount factors from the year fraction: the forward
++        is (df(start)/df(start + index tenor) - 1) / tau(start, end),
++        with tau the same year fraction as the other leg (see
++        ql/cashflows/decoupledaccrualiborcoupon.hpp). The tenor is the one
++        of the ibor index. Forces indexed coupons.
 +        \warning The helper that is meant to pin the curve over that same
 +                 period (the stub) must NOT use it: its error would no
 +                 longer depend on the curve node and the bootstrap would
@@ -1858,13 +2016,15 @@ index 0000000..e052062
 +                DayCounter iborDayCounter = DayCounter(),
 +                bool overnightFlatRatePayment = false,
 +                bool iborFlatRatePayment = false,
-+                const Handle<Quote>& firstIborRate = Handle<Quote>())
++                const Handle<Quote>& firstIborRate = Handle<Quote>(),
++                bool iborCalculationOnIndexTenor = false)
 +        : RateHelper(basis), startDate_(startDate), endDate_(endDate),
 +          calendar_(std::move(calendar)), convention_(convention), endOfMonth_(endOfMonth),
 +          discountHandle_(std::move(discountHandle)), bootstrapBaseCurve_(bootstrapBaseCurve),
 +          paymentLag_(paymentLag), basisOnIborLeg_(basisOnIborLeg),
 +          overnightFlatRatePayment_(overnightFlatRatePayment),
-+          iborFlatRatePayment_(iborFlatRatePayment), firstIborRate_(firstIborRate) {
++          iborFlatRatePayment_(iborFlatRatePayment), firstIborRate_(firstIborRate),
++          iborCalculationOnIndexTenor_(iborCalculationOnIndexTenor) {
 +
 +            QL_REQUIRE(baseIndex, "null base overnight index");
 +            QL_REQUIRE(otherIndex, "null other ibor index");
@@ -1945,7 +2105,8 @@ index 0000000..e052062
 +            IborLeg iborLegBuilder = IborLeg(iborSchedule, otherIndex_)
 +                .withNotionals(100.0)
 +                .withPaymentLag(paymentLag_)
-+                .withIndexedCoupons(useIndexedCoupons);
++                .withIndexedCoupons(iborCalculationOnIndexTenor_ ?
++                                    ext::optional<bool>(true) : useIndexedCoupons);
 +            if (iborDayCounter != DayCounter())
 +                iborLegBuilder.withPaymentDayCounter(iborDayCounter);
 +            Leg otherLeg = iborLegBuilder;
@@ -1967,7 +2128,17 @@ index 0000000..e052062
 +            // ext::shared_ptr<Coupon> so the two wrapping steps below (flat
 +            // rate, then early payment) can be composed in either order
 +            ext::shared_ptr<Coupon> baseCashFlow = lastBaseCoupon;
-+            ext::shared_ptr<Coupon> otherCashFlow = lastOtherCoupon;
++            if (iborCalculationOnIndexTenor_) {
++                // every ibor coupon: forward from df(start) and df(start +
++                // index tenor), but divided by the year fraction start-end
++                QL_REQUIRE(!useIndexedCoupons || *useIndexedCoupons,
++                           "iborCalculationOnIndexTenor requires indexed coupons");
++                for (auto& cf : otherLeg)
++                    cf = ext::make_shared<DecoupledAccrualIborCoupon>(
++                        ext::dynamic_pointer_cast<IborCoupon>(cf));
++            }
++            ext::shared_ptr<Coupon> otherCashFlow =
++                ext::dynamic_pointer_cast<Coupon>(otherLeg.back());
 +
 +            // first flow of the ibor leg at a user-supplied rate instead of
 +            // the forecast from the curve being bootstrapped. For a
@@ -2083,6 +2254,7 @@ index 0000000..e052062
 +        bool overnightFlatRatePayment_;
 +        bool iborFlatRatePayment_;
 +        Handle<Quote> firstIborRate_;
++        bool iborCalculationOnIndexTenor_;
 +
 +        ext::shared_ptr<Swap> swap_;
 +        RelinkableHandle<YieldTermStructure> termStructureHandle_;
