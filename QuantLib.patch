@@ -88,10 +88,10 @@ index 0000000..0380809
 +}
 diff --git a/FRONTIER_MIXED_INTERPOLATION.md b/FRONTIER_MIXED_INTERPOLATION.md
 new file mode 100644
-index 0000000..8fe7696
+index 0000000..95e5401
 --- /dev/null
 +++ b/FRONTIER_MIXED_INTERPOLATION.md
-@@ -0,0 +1,570 @@
+@@ -0,0 +1,579 @@
 +# Fork QuantLib: interpolazione mista con "data di frontiera"
 +
 +Questo fork aggiunge a QuantLib un nuovo schema di interpolazione per curve
@@ -662,6 +662,15 @@ index 0000000..8fe7696
 +primo flusso della gamba Ibor paga questo tasso (importo = tasso x tau x nominale)
 +invece del forward letto dalla curva in bootstrap; gli altri flussi restano
 +invariati. Il quote e' osservato: `SimpleQuote.setValue(...)` ricalcola l'helper.
++
++## Correzione v13: nodo di frontiera
++
++Il nodo di frontiera (da cui parte la spline) e' ora il **primo pillar con
++t >= frontierTime** (tolleranza 1e-10). Prima della v13, se `frontierTime`
++coincideva esattamente con il tempo di un pillar, la spline partiva dal pillar
++SUCCESSIVO (off-by-one); se cadeva tra due pillar il comportamento e' invariato.
++La matematica della spline (naturale, solo sui punti dal frontier in poi, in
++r*t o in r) e' verificata contro scipy `CubicSpline(bc_type='natural')` a 4e-16.
 diff --git a/ql/CMakeLists.txt b/ql/CMakeLists.txt
 index 436612a..1d01b6b 100644
 --- a/ql/CMakeLists.txt
@@ -1279,10 +1288,10 @@ index a89b680..89aab16 100644
  #include <ql/math/interpolations/kernelinterpolation2d.hpp>
 diff --git a/ql/math/interpolations/frontierlinearrtcubicinterpolation.hpp b/ql/math/interpolations/frontierlinearrtcubicinterpolation.hpp
 new file mode 100644
-index 0000000..0309ef2
+index 0000000..3e8ee0d
 --- /dev/null
 +++ b/ql/math/interpolations/frontierlinearrtcubicinterpolation.hpp
-@@ -0,0 +1,366 @@
+@@ -0,0 +1,368 @@
 +/* -*- mode: c++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
 +
 +/*
@@ -1540,12 +1549,14 @@ index 0000000..0309ef2
 +
 +                Size size = static_cast<Size>(this->xEnd_ - this->xBegin_);
 +
-+                // n_ = index of the last point at or before the frontier
-+                // time (the "frontier pillar"); always kept between 1 and
-+                // size-2 so both segments retain at least one point of
-+                // their own besides the shared frontier pillar.
++                // n_ = index of the frontier pillar: the first point at or
++                // after the frontier time (a pillar lying exactly on the
++                // frontier time is the frontier pillar itself, up to a
++                // tiny tolerance for floating-point noise); always kept
++                // between 1 and size-2 so both segments retain at least
++                // one point of their own besides the shared frontier pillar.
 +                n_ = 0;
-+                while (n_ + 1 < size && this->xBegin_[n_] <= frontierTime_)
++                while (n_ + 1 < size && this->xBegin_[n_] < frontierTime_ - 1.0e-10)
 +                    ++n_;
 +                if (n_ == 0)
 +                    n_ = 1;
