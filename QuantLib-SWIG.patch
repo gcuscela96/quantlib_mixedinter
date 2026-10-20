@@ -201,7 +201,7 @@ index a7121b6..9df3164 100644
  
  // global bootstrapper
 diff --git a/SWIG/ratehelpers.i b/SWIG/ratehelpers.i
-index b95a232..037af15 100644
+index b95a232..de75130 100644
 --- a/SWIG/ratehelpers.i
 +++ b/SWIG/ratehelpers.i
 @@ -51,6 +51,8 @@ using QuantLib::ConstNotionalCrossCurrencyBasisSwapRateHelper;
@@ -213,10 +213,16 @@ index b95a232..037af15 100644
  using QuantLib::OvernightOvernightBasisSwapRateHelper;
  using QuantLib::OvernightIndexedFundingRateHelper;
  using QuantLib::MultipleResetsSwapRateHelper;
-@@ -754,6 +756,94 @@ class OvernightIborBasisSwapRateHelper : public RateHelper {
-     ext::shared_ptr<Swap> swap();
- };
- 
+@@ -750,7 +752,97 @@ class OvernightIborBasisSwapRateHelper : public RateHelper {
+                                      RateAveraging::Type averagingMethod = RateAveraging::Compound,
+                                      bool telescopicValueDates = false,
+                                      bool basisOnIborLeg = false,
+-                                     StubIndexSelection iborStubIndexSelection = StubIndexSelection());
++                                     StubIndexSelection iborStubIndexSelection = StubIndexSelection(),
++                                     Handle<Quote> firstIborRate = Handle<Quote>());
++    ext::shared_ptr<Swap> swap();
++};
++
 +%shared_ptr(OvernightIborBasisSwapRateHelperCustomPillar)
 +class OvernightIborBasisSwapRateHelperCustomPillar : public RateHelper {
 +    #if !defined(SWIGJAVA) && !defined(SWIGCSHARP)
@@ -246,7 +252,8 @@ index b95a232..037af15 100644
 +                                     DateGeneration::Rule rule = DateGeneration::Backward,
 +                                     RateAveraging::Type averagingMethod = RateAveraging::Compound,
 +                                     bool telescopicValueDates = false,
-+                                     bool basisOnIborLeg = false);
++                                     bool basisOnIborLeg = false,
++                                     Handle<Quote> firstIborRate = Handle<Quote>());
 +    ext::shared_ptr<Swap> swap();
 +};
 +
@@ -302,9 +309,6 @@ index b95a232..037af15 100644
 +                                     bool iborFlatRatePayment = false,
 +                                     const Handle<Quote>& firstIborRate = Handle<Quote>(),
 +                                     bool iborCalculationOnIndexTenor = false);
-+    ext::shared_ptr<Swap> swap();
-+};
-+
- %shared_ptr(OvernightOvernightBasisSwapRateHelper)
- class OvernightOvernightBasisSwapRateHelper : public RateHelper {
-     #if !defined(SWIGJAVA) && !defined(SWIGCSHARP)
+     ext::shared_ptr<Swap> swap();
+ };
+ 

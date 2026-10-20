@@ -88,10 +88,10 @@ index 0000000..0380809
 +}
 diff --git a/FRONTIER_MIXED_INTERPOLATION.md b/FRONTIER_MIXED_INTERPOLATION.md
 new file mode 100644
-index 0000000..0c137d1
+index 0000000..8fe7696
 --- /dev/null
 +++ b/FRONTIER_MIXED_INTERPOLATION.md
-@@ -0,0 +1,562 @@
+@@ -0,0 +1,570 @@
 +# Fork QuantLib: interpolazione mista con "data di frontiera"
 +
 +Questo fork aggiunge a QuantLib un nuovo schema di interpolazione per curve
@@ -654,6 +654,14 @@ index 0000000..0c137d1
 +Verificato in C++: su uno strumento 16/12/2026 → 03/02/2027 (τ = 49/360)
 +la cedola vale esattamente (df(16/12/2026)/df(16/03/2027) − 1)/τ e il
 +bootstrap Newton riprezza tutti gli helper con errore 2e-15.
++
++## `firstIborRate` sugli helper spot starting (v12)
++
++`OvernightIborBasisSwapRateHelper` (e `OvernightIborBasisSwapRateHelperCustomPillar`)
++accettano l'ultimo parametro opzionale `firstIborRate` (`Handle<Quote>`). Il
++primo flusso della gamba Ibor paga questo tasso (importo = tasso x tau x nominale)
++invece del forward letto dalla curva in bootstrap; gli altri flussi restano
++invariati. Il quote e' osservato: `SimpleQuote.setValue(...)` ricalcola l'helper.
 diff --git a/ql/CMakeLists.txt b/ql/CMakeLists.txt
 index 436612a..1d01b6b 100644
 --- a/ql/CMakeLists.txt
@@ -1168,6 +1176,83 @@ index 0000000..0a53988
 +}
 +
 +#endif
+diff --git a/ql/experimental/termstructures/basisswapratehelpers.cpp b/ql/experimental/termstructures/basisswapratehelpers.cpp
+index 53526a6..d0401b6 100644
+--- a/ql/experimental/termstructures/basisswapratehelpers.cpp
++++ b/ql/experimental/termstructures/basisswapratehelpers.cpp
+@@ -20,6 +20,7 @@
+ 
+ #include <ql/cashflows/iborcoupon.hpp>
+ #include <ql/cashflows/overnightindexedcoupon.hpp>
++#include <ql/cashflows/overriddenratecoupon.hpp>
+ #include <ql/experimental/termstructures/basisswapratehelpers.hpp>
+ #include <ql/pricingengines/swap/discountingswapengine.hpp>
+ #include <ql/utilities/null_deleter.hpp>
+@@ -171,14 +172,16 @@ namespace QuantLib {
+         RateAveraging::Type averagingMethod,
+         bool telescopicValueDates,
+         bool basisOnIborLeg,
+-        StubIndexSelection iborStubIndexSelection)
++        StubIndexSelection iborStubIndexSelection,
++        Handle<Quote> firstIborRate)
+     : RelativeDateRateHelper(basis), tenor_(tenor), settlementDays_(settlementDays),
+       calendar_(std::move(calendar)), convention_(convention), endOfMonth_(endOfMonth),
+       discountHandle_(std::move(discountHandle)), bootstrapBaseCurve_(bootstrapBaseCurve),
+       paymentLag_(paymentLag), overnightPaymentFrequency_(overnightPaymentFrequency),
+       useIndexedCoupons_(useIndexedCoupons), rule_(rule), averagingMethod_(averagingMethod),
+       telescopicValueDates_(telescopicValueDates), basisOnIborLeg_(basisOnIborLeg),
+-      iborStubIndexSelection_(std::move(iborStubIndexSelection)) {
++      iborStubIndexSelection_(std::move(iborStubIndexSelection)),
++      firstIborRate_(std::move(firstIborRate)) {
+ 
+         QL_REQUIRE(baseIndex, "null base overnight index");
+         QL_REQUIRE(otherIndex, "null other ibor index");
+@@ -205,6 +208,7 @@ namespace QuantLib {
+         registerWith(baseIndex_);
+         registerWith(otherIndex_);
+         registerWith(discountHandle_);
++        registerWith(firstIborRate_);
+         for (const auto& candidate : iborStubIndexSelection_.indices())
+             registerWith(candidate);
+ 
+@@ -253,6 +257,15 @@ namespace QuantLib {
+             .withStubIndexSelection(iborStubIndexSelection_);
+         auto lastOtherCoupon = ext::dynamic_pointer_cast<IborCoupon>(otherLeg.back());
+ 
++        // the first ibor coupon pays the given rate instead of the forward
++        // read from the curve being bootstrapped
++        if (!firstIborRate_.empty()) {
++            auto firstCoupon = ext::dynamic_pointer_cast<Coupon>(otherLeg.front());
++            QL_REQUIRE(firstCoupon, "first ibor cash flow is not a coupon");
++            otherLeg.front() =
++                ext::make_shared<OverriddenRateCoupon>(firstCoupon, firstIborRate_);
++        }
++
+         maturityDate_ = std::max(overnightSchedule.endDate(), iborSchedule.endDate());
+ 
+         // the payment lag can push the last payment past the maturity date,
+diff --git a/ql/experimental/termstructures/basisswapratehelpers.hpp b/ql/experimental/termstructures/basisswapratehelpers.hpp
+index 57241a3..e800fa5 100644
+--- a/ql/experimental/termstructures/basisswapratehelpers.hpp
++++ b/ql/experimental/termstructures/basisswapratehelpers.hpp
+@@ -148,7 +148,8 @@ namespace QuantLib {
+                                          RateAveraging::Type averagingMethod = RateAveraging::Compound,
+                                          bool telescopicValueDates = false,
+                                          bool basisOnIborLeg = false,
+-                                         StubIndexSelection iborStubIndexSelection = {});
++                                         StubIndexSelection iborStubIndexSelection = {},
++                                         Handle<Quote> firstIborRate = Handle<Quote>());
+ 
+         Real impliedQuote() const override;
+         void accept(AcyclicVisitor&) override;
+@@ -175,6 +176,7 @@ namespace QuantLib {
+         bool telescopicValueDates_;
+         bool basisOnIborLeg_;
+         StubIndexSelection iborStubIndexSelection_;
++        Handle<Quote> firstIborRate_;
+ 
+         ext::shared_ptr<Swap> swap_;
+ 
 diff --git a/ql/math/interpolations/Makefile.am b/ql/math/interpolations/Makefile.am
 index d958dd9..19663ad 100644
 --- a/ql/math/interpolations/Makefile.am
@@ -2552,10 +2637,10 @@ index 0000000..4a69f6b
 +#endif
 diff --git a/ql/termstructures/yield/ratehelperwithcustompillar.hpp b/ql/termstructures/yield/ratehelperwithcustompillar.hpp
 new file mode 100644
-index 0000000..b506d64
+index 0000000..8696d9d
 --- /dev/null
 +++ b/ql/termstructures/yield/ratehelperwithcustompillar.hpp
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,114 @@
 +/* -*- mode: c++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
 +
 +/*
@@ -2657,12 +2742,14 @@ index 0000000..b506d64
 +                DateGeneration::Rule rule = DateGeneration::Backward,
 +                RateAveraging::Type averagingMethod = RateAveraging::Compound,
 +                bool telescopicValueDates = false,
-+                bool basisOnIborLeg = false)
++                bool basisOnIborLeg = false,
++                Handle<Quote> firstIborRate = Handle<Quote>())
 +        : RateHelperWithCustomPillar<OvernightIborBasisSwapRateHelper>(
 +              customPillarDate, basis, tenor, settlementDays, std::move(calendar), convention,
 +              endOfMonth, baseIndex, otherIndex, std::move(discountHandle), bootstrapBaseCurve,
 +              paymentLag, overnightPaymentFrequency, useIndexedCoupons, rule, averagingMethod,
-+              telescopicValueDates, basisOnIborLeg) {}
++              telescopicValueDates, basisOnIborLeg, StubIndexSelection(),
++              std::move(firstIborRate)) {}
 +    };
 +
 +}
