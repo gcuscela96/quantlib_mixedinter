@@ -88,10 +88,10 @@ index 0000000..0380809
 +}
 diff --git a/FRONTIER_MIXED_INTERPOLATION.md b/FRONTIER_MIXED_INTERPOLATION.md
 new file mode 100644
-index 0000000..95e5401
+index 0000000..ade05e9
 --- /dev/null
 +++ b/FRONTIER_MIXED_INTERPOLATION.md
-@@ -0,0 +1,579 @@
+@@ -0,0 +1,604 @@
 +# Fork QuantLib: interpolazione mista con "data di frontiera"
 +
 +Questo fork aggiunge a QuantLib un nuovo schema di interpolazione per curve
@@ -671,8 +671,33 @@ index 0000000..95e5401
 +SUCCESSIVO (off-by-one); se cadeva tra due pillar il comportamento e' invariato.
 +La matematica della spline (naturale, solo sui punti dal frontier in poi, in
 +r*t o in r) e' verificata contro scipy `CubicSpline(bc_type='natural')` a 4e-16.
++
++## Basis swap a tre gambe (v14)
++
++`ql/termstructures/yield/threelegbasisswaphelper.hpp` aggiunge:
++
++- `BasisSwapLegSpec(tenor, calendar, convention, rule, endOfMonth, dayCounter, paymentLag)`:
++  convenzioni di una gamba. Default: tenor dell'indice (1Y per la fissa),
++  calendario dell'helper, ModifiedFollowing, Backward, EOM false, day counter
++  dell'indice (30/360 Bond Basis per la fissa), payment lag 0.
++- `IborIborFixedBasisSwapRateHelper(basis, tenor, settlementDays, calendar,
++  baseIndex, otherIndex, discountHandle, baseLeg, otherLeg, fixedLeg,
++  bootstrapBaseCurve=False, fixedLegWithBaseIndex=True, useIndexedCoupons,
++  firstIborRate, customPillarDate)` — spot starting.
++- `IborIborFixedBasisSwapRateHelperForwardStarting(basis, startDate, endDate, calendar, ...)`
++  — stessi argomenti, date esplicite.
++
++Pricing: due gambe Ibor a spread zero e una gamba fissa al tasso quotato, tutte
++scontate su `discountHandle` (ESTR). A par `NPV(other) = NPV(base) + NPV(fissa)`
++(con `fixedLegWithBaseIndex=False`: `NPV(base) = NPV(other) + NPV(fissa)`);
++quota implicita = differenza di PV delle gambe flottanti / annuity della fissa.
++Si bootstrappa `otherIndex` (es. Euribor 6M, curva a spread su ESTR con
++`PiecewiseFrontierMixedRtZeroSpreaded`); `baseIndex` (3M) deve avere gia' la
++sua curva. `firstIborRate` sostituisce il primo coupon della gamba sull'indice
++bootstrappato. `swap()` ha le gambe: 0 = other, 1 = base, 2 = fissa a tasso 0.
++Test: `test_three_leg_basis.py`.
 diff --git a/ql/CMakeLists.txt b/ql/CMakeLists.txt
-index 436612a..1d01b6b 100644
+index 436612a..fc6cd35 100644
 --- a/ql/CMakeLists.txt
 +++ b/ql/CMakeLists.txt
 @@ -1007,8 +1007,12 @@ set(QL_HEADERS
@@ -696,15 +721,16 @@ index 436612a..1d01b6b 100644
      math/interpolations/interpolation2d.hpp
      math/interpolations/kernelinterpolation.hpp
      math/interpolations/kernelinterpolation2d.hpp
-@@ -2210,6 +2215,7 @@ set(QL_HEADERS
+@@ -2210,6 +2215,8 @@ set(QL_HEADERS
      termstructures/yield/flatforward.hpp
      termstructures/yield/forwardcurve.hpp
      termstructures/yield/forwardspreadedtermstructure.hpp
 +    termstructures/yield/forwardstartingbasisswaphelper.hpp
++    termstructures/yield/threelegbasisswaphelper.hpp
      termstructures/yield/forwardstructure.hpp
      termstructures/yield/impliedtermstructure.hpp
      termstructures/yield/interpolatedsimplezerocurve.hpp
-@@ -2218,9 +2224,11 @@ set(QL_HEADERS
+@@ -2218,9 +2225,11 @@ set(QL_HEADERS
      termstructures/yield/oisratehelper.hpp
      termstructures/yield/overnightindexfutureratehelper.hpp
      termstructures/yield/piecewisespreadyieldcurve.hpp
@@ -1917,18 +1943,19 @@ index f8aaaf1..581ac1e 100644
  
  #endif
 diff --git a/ql/termstructures/yield/Makefile.am b/ql/termstructures/yield/Makefile.am
-index 6824ab7..5adf4e5 100644
+index 6824ab7..e844af7 100644
 --- a/ql/termstructures/yield/Makefile.am
 +++ b/ql/termstructures/yield/Makefile.am
-@@ -13,6 +13,7 @@ this_include_HEADERS = \
+@@ -13,6 +13,8 @@ this_include_HEADERS = \
      flatforward.hpp \
      forwardcurve.hpp \
      forwardspreadedtermstructure.hpp \
 +    forwardstartingbasisswaphelper.hpp \
++    threelegbasisswaphelper.hpp \
      forwardstructure.hpp \
      impliedtermstructure.hpp \
      interpolatedsimplezerocurve.hpp \
-@@ -21,10 +22,12 @@ this_include_HEADERS = \
+@@ -21,10 +23,12 @@ this_include_HEADERS = \
      oisratehelper.hpp \
      overnightindexfutureratehelper.hpp \
      piecewisespreadyieldcurve.hpp \
@@ -1942,10 +1969,10 @@ index 6824ab7..5adf4e5 100644
      spreadbootstraptraits.hpp \
      spreaddiscountcurve.hpp \
 diff --git a/ql/termstructures/yield/all.hpp b/ql/termstructures/yield/all.hpp
-index b724707..8b252a7 100644
+index b724707..1ae872a 100644
 --- a/ql/termstructures/yield/all.hpp
 +++ b/ql/termstructures/yield/all.hpp
-@@ -18,10 +18,13 @@
+@@ -18,10 +18,14 @@
  #include <ql/termstructures/yield/oisratehelper.hpp>
  #include <ql/termstructures/yield/overnightindexfutureratehelper.hpp>
  #include <ql/termstructures/yield/piecewisespreadyieldcurve.hpp>
@@ -1954,6 +1981,7 @@ index b724707..8b252a7 100644
  #include <ql/termstructures/yield/piecewiseforwardspreadedtermstructure.hpp>
  #include <ql/termstructures/yield/piecewisezerospreadedtermstructure.hpp>
 +#include <ql/termstructures/yield/forwardstartingbasisswaphelper.hpp>
++#include <ql/termstructures/yield/threelegbasisswaphelper.hpp>
  #include <ql/termstructures/yield/quantotermstructure.hpp>
 +#include <ql/termstructures/yield/ratehelperwithcustompillar.hpp>
  #include <ql/termstructures/yield/ratehelpers.hpp>
@@ -2761,6 +2789,368 @@ index 0000000..8696d9d
 +              paymentLag, overnightPaymentFrequency, useIndexedCoupons, rule, averagingMethod,
 +              telescopicValueDates, basisOnIborLeg, StubIndexSelection(),
 +              std::move(firstIborRate)) {}
++    };
++
++}
++
++#endif
+diff --git a/ql/termstructures/yield/threelegbasisswaphelper.hpp b/ql/termstructures/yield/threelegbasisswaphelper.hpp
+new file mode 100644
+index 0000000..18e99ef
+--- /dev/null
++++ b/ql/termstructures/yield/threelegbasisswaphelper.hpp
+@@ -0,0 +1,356 @@
++/* -*- mode: c++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
++
++/*
++ This file is part of a fork of QuantLib adding a three-leg ibor-ibor
++ basis swap rate helper: two floating ibor legs (e.g. Euribor 3M and
++ Euribor 6M) at zero spread plus a fixed leg paying the quoted basis,
++ each leg with its own schedule and conventions.
++
++ QuantLib is free software: you can redistribute it and/or modify it
++ under the terms of the QuantLib license.  You should have received a
++ copy of the license along with this program; if not, please email
++ <quantlib-dev@lists.sf.net>. The license is also available online at
++ <https://www.quantlib.org/license.shtml>.
++
++ This program is distributed in the hope that it will be useful, but WITHOUT
++ ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
++ FOR A PARTICULAR PURPOSE.  See the license for more details.
++*/
++
++/*! \file threelegbasisswaphelper.hpp
++    \brief ibor-ibor basis swap rate helpers whose basis is paid by a
++           separate fixed leg (spot-starting and forward-starting)
++*/
++
++#ifndef quantlib_three_leg_basis_swap_helper_hpp
++#define quantlib_three_leg_basis_swap_helper_hpp
++
++#include <ql/cashflows/fixedratecoupon.hpp>
++#include <ql/cashflows/iborcoupon.hpp>
++#include <ql/cashflows/overriddenratecoupon.hpp>
++#include <ql/indexes/iborindex.hpp>
++#include <ql/instruments/swap.hpp>
++#include <ql/pricingengines/swap/discountingswapengine.hpp>
++#include <ql/termstructures/yield/ratehelpers.hpp>
++#include <ql/time/daycounters/thirty360.hpp>
++#include <ql/time/schedule.hpp>
++#include <ql/utilities/null_deleter.hpp>
++#include <optional>
++#include <utility>
++
++namespace QuantLib {
++
++    //! schedule and accrual conventions of one leg of a three-leg basis swap
++    /*! Every field has a default:
++        - \c tenor: empty Period() means the index tenor for an ibor leg
++          and 1 year for the fixed leg;
++        - \c calendar: an empty Calendar() means the helper's calendar;
++        - \c dayCounter: an empty DayCounter() means the index day
++          counter for an ibor leg and 30/360 (Bond Basis) for the fixed leg.
++    */
++    class BasisSwapLegSpec {
++      public:
++        explicit BasisSwapLegSpec(const Period& tenor = Period(),
++                                  Calendar calendar = Calendar(),
++                                  BusinessDayConvention convention = ModifiedFollowing,
++                                  DateGeneration::Rule rule = DateGeneration::Backward,
++                                  bool endOfMonth = false,
++                                  DayCounter dayCounter = DayCounter(),
++                                  Integer paymentLag = 0)
++        : tenor(tenor), calendar(std::move(calendar)), convention(convention), rule(rule),
++          endOfMonth(endOfMonth), dayCounter(std::move(dayCounter)), paymentLag(paymentLag) {}
++
++        Period tenor;
++        Calendar calendar;
++        BusinessDayConvention convention;
++        DateGeneration::Rule rule;
++        bool endOfMonth;
++        DayCounter dayCounter;
++        Integer paymentLag;
++    };
++
++    //! Rate helper over a three-leg ibor-ibor basis swap
++    /*! The swap has two floating legs at zero spread, on \c baseIndex
++        (e.g. Euribor 3M) and \c otherIndex (e.g. Euribor 6M), and a
++        fixed leg whose rate is the quoted basis.  At par:
++
++            NPV(other leg) = NPV(base leg) + NPV(fixed leg)
++
++        (or NPV(base) = NPV(other) + NPV(fixed) if
++        \c fixedLegWithBaseIndex is false).  The implied quote is the
++        fixed rate that makes this hold, i.e. the PV difference of the
++        two floating legs divided by the fixed-leg annuity.
++
++        The curve being bootstrapped forecasts \c otherIndex (or
++        \c baseIndex if \c bootstrapBaseCurve is true); the other index
++        must already have a forecast curve.  All legs are discounted on
++        \c discountHandle (e.g. the ESTR curve); if empty, the curve
++        being bootstrapped is used.
++
++        Each leg has its own schedule (tenor, calendar, convention,
++        rule, end of month), accrual day counter and payment lag, see
++        BasisSwapLegSpec.
++
++        \c firstIborRate (optional) makes the first coupon of the leg
++        on the index being bootstrapped pay that rate instead of the
++        forward read from the curve.
++
++        By default the pillar is the latest relevant date (maturity,
++        last payment, last fixing end); \c customPillarDate overrides it.
++    */
++    class IborIborFixedBasisSwapRateHelper : public RelativeDateRateHelper {
++      public:
++        //! spot-starting: start = settlementDays after today, end = start + tenor
++        IborIborFixedBasisSwapRateHelper(
++                const Handle<Quote>& basis,
++                const Period& tenor,
++                Natural settlementDays,
++                Calendar calendar,
++                const ext::shared_ptr<IborIndex>& baseIndex,
++                const ext::shared_ptr<IborIndex>& otherIndex,
++                Handle<YieldTermStructure> discountHandle = Handle<YieldTermStructure>(),
++                BasisSwapLegSpec baseLeg = BasisSwapLegSpec(),
++                BasisSwapLegSpec otherLeg = BasisSwapLegSpec(),
++                BasisSwapLegSpec fixedLeg = BasisSwapLegSpec(),
++                bool bootstrapBaseCurve = false,
++                bool fixedLegWithBaseIndex = true,
++                std::optional<bool> useIndexedCoupons = std::nullopt,
++                Handle<Quote> firstIborRate = Handle<Quote>(),
++                const Date& customPillarDate = Date())
++        : IborIborFixedBasisSwapRateHelper(basis, tenor, settlementDays, Date(), Date(),
++                                           std::move(calendar), baseIndex, otherIndex,
++                                           std::move(discountHandle), std::move(baseLeg),
++                                           std::move(otherLeg), std::move(fixedLeg),
++                                           bootstrapBaseCurve, fixedLegWithBaseIndex,
++                                           useIndexedCoupons, std::move(firstIborRate),
++                                           customPillarDate) {}
++
++        Real impliedQuote() const override {
++            swap_->deepUpdate();
++            Real bps = swap_->legBPS(2);
++            QL_REQUIRE(bps != 0.0, "fixed leg with zero annuity");
++            return -(swap_->NPV() / bps) * 1.0e-4;
++        }
++
++        void accept(AcyclicVisitor& v) override {
++            auto* v1 = dynamic_cast<Visitor<IborIborFixedBasisSwapRateHelper>*>(&v);
++            if (v1 != nullptr)
++                v1->visit(*this);
++            else
++                RateHelper::accept(v);
++        }
++
++        //! legs: 0 = other index, 1 = base index, 2 = fixed (built at zero rate)
++        ext::shared_ptr<Swap> swap() const { return swap_; }
++
++      protected:
++        IborIborFixedBasisSwapRateHelper(const Handle<Quote>& basis,
++                                         const Period& tenor,
++                                         Natural settlementDays,
++                                         const Date& startDate,
++                                         const Date& endDate,
++                                         Calendar calendar,
++                                         const ext::shared_ptr<IborIndex>& baseIndex,
++                                         const ext::shared_ptr<IborIndex>& otherIndex,
++                                         Handle<YieldTermStructure> discountHandle,
++                                         BasisSwapLegSpec baseLeg,
++                                         BasisSwapLegSpec otherLeg,
++                                         BasisSwapLegSpec fixedLeg,
++                                         bool bootstrapBaseCurve,
++                                         bool fixedLegWithBaseIndex,
++                                         std::optional<bool> useIndexedCoupons,
++                                         Handle<Quote> firstIborRate,
++                                         const Date& customPillarDate)
++        : RelativeDateRateHelper(basis), tenor_(tenor), settlementDays_(settlementDays),
++          startDate_(startDate), endDate_(endDate), calendar_(std::move(calendar)),
++          discountHandle_(std::move(discountHandle)), baseSpec_(std::move(baseLeg)),
++          otherSpec_(std::move(otherLeg)), fixedSpec_(std::move(fixedLeg)),
++          bootstrapBaseCurve_(bootstrapBaseCurve),
++          fixedLegWithBaseIndex_(fixedLegWithBaseIndex),
++          useIndexedCoupons_(useIndexedCoupons), firstIborRate_(std::move(firstIborRate)),
++          customPillarDate_(customPillarDate) {
++
++            QL_REQUIRE(baseIndex, "null base ibor index");
++            QL_REQUIRE(otherIndex, "null other ibor index");
++            if (startDate_ != Date())
++                QL_REQUIRE(endDate_ > startDate_, "endDate (" << endDate_
++                           << ") must be later than startDate (" << startDate_ << ")");
++
++            // clone the index whose forecast curve is being bootstrapped
++            if (bootstrapBaseCurve_) {
++                baseIndex_ = baseIndex->clone(termStructureHandle_);
++                baseIndex_->unregisterWith(termStructureHandle_);
++                otherIndex_ = otherIndex;
++            } else {
++                baseIndex_ = baseIndex;
++                otherIndex_ = otherIndex->clone(termStructureHandle_);
++                otherIndex_->unregisterWith(termStructureHandle_);
++            }
++
++            registerWith(baseIndex_);
++            registerWith(otherIndex_);
++            registerWith(discountHandle_);
++            registerWith(firstIborRate_);
++
++            IborIborFixedBasisSwapRateHelper::initializeDates();
++        }
++
++      private:
++        Schedule makeSchedule(const BasisSwapLegSpec& spec,
++                              const Period& defaultTenor,
++                              const Date& from,
++                              const Date& to) const {
++            Period legTenor = spec.tenor == Period() ? defaultTenor : spec.tenor;
++            Calendar legCalendar = spec.calendar.empty() ? calendar_ : spec.calendar;
++            return MakeSchedule().from(from).to(to)
++                .withTenor(legTenor)
++                .withCalendar(legCalendar)
++                .withConvention(spec.convention)
++                .withTerminationDateConvention(spec.convention)
++                .withRule(spec.rule)
++                .endOfMonth(spec.endOfMonth);
++        }
++
++        Leg makeIborLeg(const Schedule& schedule,
++                        const ext::shared_ptr<IborIndex>& index,
++                        const BasisSwapLegSpec& spec) const {
++            IborLeg builder = IborLeg(schedule, index)
++                .withNotionals(100.0)
++                .withPaymentLag(spec.paymentLag)
++                .withIndexedCoupons(useIndexedCoupons_);
++            if (!spec.dayCounter.empty())
++                builder.withPaymentDayCounter(spec.dayCounter);
++            return builder;
++        }
++
++        void initializeDates() override {
++            Date from, to;
++            if (startDate_ == Date()) {
++                Date today = Settings::instance().evaluationDate();
++                from = calendar_.advance(today, settlementDays_ * Days, Following);
++                // unadjusted, to avoid a spurious stub
++                to = from + tenor_;
++            } else {
++                from = startDate_;
++                to = endDate_;
++            }
++            earliestDate_ = from;
++
++            Schedule baseSchedule = makeSchedule(baseSpec_, baseIndex_->tenor(), from, to);
++            Schedule otherSchedule = makeSchedule(otherSpec_, otherIndex_->tenor(), from, to);
++            Schedule fixedSchedule = makeSchedule(fixedSpec_, 1 * Years, from, to);
++
++            Leg baseLeg = makeIborLeg(baseSchedule, baseIndex_, baseSpec_);
++            Leg otherLeg = makeIborLeg(otherSchedule, otherIndex_, otherSpec_);
++            DayCounter fixedDayCounter = fixedSpec_.dayCounter.empty()
++                ? DayCounter(Thirty360(Thirty360::BondBasis)) : fixedSpec_.dayCounter;
++            Leg fixedLeg = FixedRateLeg(fixedSchedule)
++                .withNotionals(100.0)
++                .withCouponRates(0.0, fixedDayCounter)
++                .withPaymentLag(fixedSpec_.paymentLag);
++
++            auto lastBaseCoupon = ext::dynamic_pointer_cast<IborCoupon>(baseLeg.back());
++            auto lastOtherCoupon = ext::dynamic_pointer_cast<IborCoupon>(otherLeg.back());
++            QL_REQUIRE(lastBaseCoupon && lastOtherCoupon, "ibor legs without ibor coupons");
++
++            maturityDate_ = std::max({baseSchedule.endDate(), otherSchedule.endDate(),
++                                      fixedSchedule.endDate()});
++            Date lastPaymentDate = std::max({baseLeg.back()->date(), otherLeg.back()->date(),
++                                             fixedLeg.back()->date()});
++            latestRelevantDate_ = std::max({maturityDate_, lastPaymentDate,
++                                            lastBaseCoupon->fixingEndDate(),
++                                            lastOtherCoupon->fixingEndDate()});
++            pillarDate_ = customPillarDate_ != Date() ? customPillarDate_ : latestRelevantDate_;
++
++            // first coupon of the leg on the bootstrapped index at a given rate
++            if (!firstIborRate_.empty()) {
++                Leg& bootstrappedLeg = bootstrapBaseCurve_ ? baseLeg : otherLeg;
++                auto firstCoupon = ext::dynamic_pointer_cast<Coupon>(bootstrappedLeg.front());
++                QL_REQUIRE(firstCoupon, "first ibor cash flow is not a coupon");
++                bootstrappedLeg.front() =
++                    ext::make_shared<OverriddenRateCoupon>(firstCoupon, firstIborRate_);
++            }
++
++            // other leg paid, base leg received; the fixed leg sits with
++            // the base leg (received) or with the other leg (paid)
++            std::vector<Leg> legs = {otherLeg, baseLeg, fixedLeg};
++            std::vector<bool> payer = {true, false, !fixedLegWithBaseIndex_};
++            swap_ = ext::make_shared<Swap>(legs, payer);
++            swap_->setPricingEngine(
++                ext::make_shared<DiscountingSwapEngine>(discountRelinkableHandle_));
++        }
++
++        void setTermStructure(YieldTermStructure* t) override {
++            bool observer = false;
++            ext::shared_ptr<YieldTermStructure> temp(t, null_deleter());
++            termStructureHandle_.linkTo(temp, observer);
++
++            if (discountHandle_.empty())
++                discountRelinkableHandle_.linkTo(temp, observer);
++            else
++                discountRelinkableHandle_.linkTo(*discountHandle_, observer);
++
++            RelativeDateRateHelper::setTermStructure(t);
++        }
++
++        Period tenor_;
++        Natural settlementDays_;
++        Date startDate_, endDate_;
++        Calendar calendar_;
++        ext::shared_ptr<IborIndex> baseIndex_, otherIndex_;
++        Handle<YieldTermStructure> discountHandle_;
++        BasisSwapLegSpec baseSpec_, otherSpec_, fixedSpec_;
++        bool bootstrapBaseCurve_;
++        bool fixedLegWithBaseIndex_;
++        std::optional<bool> useIndexedCoupons_;
++        Handle<Quote> firstIborRate_;
++        Date customPillarDate_;
++
++        ext::shared_ptr<Swap> swap_;
++        RelinkableHandle<YieldTermStructure> termStructureHandle_;
++        RelinkableHandle<YieldTermStructure> discountRelinkableHandle_;
++    };
++
++    //! forward-starting version: explicit, fixed start and end dates
++    class IborIborFixedBasisSwapRateHelperForwardStarting
++        : public IborIborFixedBasisSwapRateHelper {
++      public:
++        IborIborFixedBasisSwapRateHelperForwardStarting(
++                const Handle<Quote>& basis,
++                const Date& startDate,
++                const Date& endDate,
++                Calendar calendar,
++                const ext::shared_ptr<IborIndex>& baseIndex,
++                const ext::shared_ptr<IborIndex>& otherIndex,
++                Handle<YieldTermStructure> discountHandle = Handle<YieldTermStructure>(),
++                BasisSwapLegSpec baseLeg = BasisSwapLegSpec(),
++                BasisSwapLegSpec otherLeg = BasisSwapLegSpec(),
++                BasisSwapLegSpec fixedLeg = BasisSwapLegSpec(),
++                bool bootstrapBaseCurve = false,
++                bool fixedLegWithBaseIndex = true,
++                std::optional<bool> useIndexedCoupons = std::nullopt,
++                Handle<Quote> firstIborRate = Handle<Quote>(),
++                const Date& customPillarDate = Date())
++        : IborIborFixedBasisSwapRateHelper(basis, Period(), 0, startDate, endDate,
++                                           std::move(calendar), baseIndex, otherIndex,
++                                           std::move(discountHandle), std::move(baseLeg),
++                                           std::move(otherLeg), std::move(fixedLeg),
++                                           bootstrapBaseCurve, fixedLegWithBaseIndex,
++                                           useIndexedCoupons, std::move(firstIborRate),
++                                           customPillarDate) {
++            QL_REQUIRE(startDate != Date(), "null startDate");
++        }
++
++        void accept(AcyclicVisitor& v) override {
++            auto* v1 =
++                dynamic_cast<Visitor<IborIborFixedBasisSwapRateHelperForwardStarting>*>(&v);
++            if (v1 != nullptr)
++                v1->visit(*this);
++            else
++                IborIborFixedBasisSwapRateHelper::accept(v);
++        }
 +    };
 +
 +}
