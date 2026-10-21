@@ -88,10 +88,10 @@ index 0000000..0380809
 +}
 diff --git a/FRONTIER_MIXED_INTERPOLATION.md b/FRONTIER_MIXED_INTERPOLATION.md
 new file mode 100644
-index 0000000..ade05e9
+index 0000000..604ba72
 --- /dev/null
 +++ b/FRONTIER_MIXED_INTERPOLATION.md
-@@ -0,0 +1,604 @@
+@@ -0,0 +1,619 @@
 +# Fork QuantLib: interpolazione mista con "data di frontiera"
 +
 +Questo fork aggiunge a QuantLib un nuovo schema di interpolazione per curve
@@ -696,6 +696,21 @@ index 0000000..ade05e9
 +sua curva. `firstIborRate` sostituisce il primo coupon della gamba sull'indice
 +bootstrappato. `swap()` ha le gambe: 0 = other, 1 = base, 2 = fissa a tasso 0.
 +Test: `test_three_leg_basis.py`.
++
++## Stub / forward starting Ibor vs Ibor (v15)
++
++`IborIborBasisSwapRateHelperForwardStarting(startDate, endDate, basis, calendar,
++convention, endOfMonth, baseIndex, otherIndex, discountHandle, bootstrapBaseCurve,
++paymentLag, useIndexedCoupons, rule, customPillarDate, customPaymentDate,
++baseDayCounter, otherDayCounter, baseFlatRatePayment, otherFlatRatePayment,
++firstIborRate)` (in `forwardstartingbasisswaphelper.hpp`): analogo Ibor-Ibor
++dello stub ESTR vs 3M. Paga `baseIndex + basis` (es. Euribor 3M + spread), riceve
++`otherIndex` (es. Euribor 6M, curva bootstrappata). Ogni gamba usa il tenor del suo
++indice: con uno stub piu' corto di entrambi i tenor c'e' un solo periodo per gamba
++e, con `useIndexedCoupons=False`, entrambi i tassi sono forward su [start, end].
++`customPaymentDate` e i pagamenti flat (importo = tasso x nozionale) richiedono
++gambe a periodo singolo. Pillar: customPillarDate, altrimenti customPaymentDate,
++altrimenti endDate. Test: `test_ibor_ibor_stub.py`.
 diff --git a/ql/CMakeLists.txt b/ql/CMakeLists.txt
 index 436612a..fc6cd35 100644
 --- a/ql/CMakeLists.txt
@@ -892,10 +907,10 @@ index 0000000..624a488
 +#endif
 diff --git a/ql/cashflows/earlypaymentcoupon.hpp b/ql/cashflows/earlypaymentcoupon.hpp
 new file mode 100644
-index 0000000..0c44855
+index 0000000..0d48396
 --- /dev/null
 +++ b/ql/cashflows/earlypaymentcoupon.hpp
-@@ -0,0 +1,109 @@
+@@ -0,0 +1,110 @@
 +/* -*- mode: c++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
 +
 +/*
@@ -924,6 +939,7 @@ index 0000000..0c44855
 +#define quantlib_early_payment_coupon_hpp
 +
 +#include <ql/cashflows/coupon.hpp>
++#include <ql/time/daycounter.hpp>
 +#include <utility>
 +
 +namespace QuantLib {
@@ -1007,10 +1023,10 @@ index 0000000..0c44855
 +#endif
 diff --git a/ql/cashflows/flatratecoupon.hpp b/ql/cashflows/flatratecoupon.hpp
 new file mode 100644
-index 0000000..2a7cc52
+index 0000000..69909b8
 --- /dev/null
 +++ b/ql/cashflows/flatratecoupon.hpp
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,103 @@
 +/* -*- mode: c++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
 +
 +/*
@@ -1038,6 +1054,7 @@ index 0000000..2a7cc52
 +#define quantlib_flat_rate_coupon_hpp
 +
 +#include <ql/cashflows/coupon.hpp>
++#include <ql/time/daycounter.hpp>
 +#include <utility>
 +
 +namespace QuantLib {
@@ -1115,10 +1132,10 @@ index 0000000..2a7cc52
 +#endif
 diff --git a/ql/cashflows/overriddenratecoupon.hpp b/ql/cashflows/overriddenratecoupon.hpp
 new file mode 100644
-index 0000000..0a53988
+index 0000000..0ef2626
 --- /dev/null
 +++ b/ql/cashflows/overriddenratecoupon.hpp
-@@ -0,0 +1,92 @@
+@@ -0,0 +1,93 @@
 +/* -*- mode: c++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
 +
 +/*
@@ -1146,6 +1163,7 @@ index 0000000..0a53988
 +#define quantlib_overridden_rate_coupon_hpp
 +
 +#include <ql/cashflows/coupon.hpp>
++#include <ql/time/daycounter.hpp>
 +#include <ql/quote.hpp>
 +#include <ql/handle.hpp>
 +#include <utility>
@@ -1989,10 +2007,10 @@ index b724707..1ae872a 100644
  #include <ql/termstructures/yield/spreaddiscountcurve.hpp>
 diff --git a/ql/termstructures/yield/forwardstartingbasisswaphelper.hpp b/ql/termstructures/yield/forwardstartingbasisswaphelper.hpp
 new file mode 100644
-index 0000000..6eb7c0b
+index 0000000..78a9e6f
 --- /dev/null
 +++ b/ql/termstructures/yield/forwardstartingbasisswaphelper.hpp
-@@ -0,0 +1,395 @@
+@@ -0,0 +1,587 @@
 +/* -*- mode: c++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
 +
 +/*
@@ -2379,6 +2397,198 @@ index 0000000..6eb7c0b
 +        bool iborFlatRatePayment_;
 +        Handle<Quote> firstIborRate_;
 +        bool iborCalculationOnIndexTenor_;
++
++        ext::shared_ptr<Swap> swap_;
++        RelinkableHandle<YieldTermStructure> termStructureHandle_;
++        RelinkableHandle<YieldTermStructure> discountRelinkableHandle_;
++    };
++
++    //! Forward-starting (or stub) ibor-vs-ibor basis swap rate helper
++    /*! Ibor-vs-ibor counterpart of
++        OvernightIborBasisSwapRateHelperForwardStarting: the swap pays
++        baseIndex + basis (e.g. Euribor 3M + spread) and receives
++        otherIndex (e.g. Euribor 6M), between two explicit, fixed dates.
++        The curve being bootstrapped forecasts otherIndex (or baseIndex if
++        bootstrapBaseCurve is true); the other index must already have a
++        forecast curve. Both legs are discounted on discountHandle.
++
++        Each leg's schedule uses its own index tenor from startDate to
++        endDate, so a stub shorter than both tenors has a single period on
++        each leg. With par coupons (useIndexedCoupons = false) both rates
++        are then forwards over the same period [startDate, endDate].
++
++        As in the overnight version: customPaymentDate pays both (single
++        period) coupons at an earlier date while they keep accruing/fixing
++        over [startDate, endDate]; the pillar defaults to customPaymentDate
++        (or endDate), unless customPillarDate is given;
++        baseDayCounter/otherDayCounter override each leg's accrual day
++        counter; baseFlatRatePayment/otherFlatRatePayment switch a leg to
++        amount = rate * nominal (no accrual period; single-period legs
++        only); firstIborRate makes the first coupon of the leg on the
++        bootstrapped index pay the given rate.
++    */
++    class IborIborBasisSwapRateHelperForwardStarting : public RateHelper {
++      public:
++        IborIborBasisSwapRateHelperForwardStarting(
++                const Date& startDate,
++                const Date& endDate,
++                const Handle<Quote>& basis,
++                Calendar calendar,
++                BusinessDayConvention convention,
++                bool endOfMonth,
++                const ext::shared_ptr<IborIndex>& baseIndex,
++                const ext::shared_ptr<IborIndex>& otherIndex,
++                Handle<YieldTermStructure> discountHandle = Handle<YieldTermStructure>(),
++                bool bootstrapBaseCurve = false,
++                Integer paymentLag = 0,
++                std::optional<bool> useIndexedCoupons = std::nullopt,
++                DateGeneration::Rule rule = DateGeneration::Backward,
++                const Date& customPillarDate = Date(),
++                const Date& customPaymentDate = Date(),
++                DayCounter baseDayCounter = DayCounter(),
++                DayCounter otherDayCounter = DayCounter(),
++                bool baseFlatRatePayment = false,
++                bool otherFlatRatePayment = false,
++                const Handle<Quote>& firstIborRate = Handle<Quote>())
++        : RateHelper(basis), discountHandle_(std::move(discountHandle)),
++          baseFlatRatePayment_(baseFlatRatePayment), firstIborRate_(firstIborRate) {
++
++            QL_REQUIRE(baseIndex, "null base ibor index");
++            QL_REQUIRE(otherIndex, "null other ibor index");
++            QL_REQUIRE(endDate > startDate, "endDate (" << endDate <<
++                       ") must be later than startDate (" << startDate << ")");
++
++            if (bootstrapBaseCurve) {
++                baseIndex_ = baseIndex->clone(termStructureHandle_);
++                baseIndex_->unregisterWith(termStructureHandle_);
++                otherIndex_ = otherIndex;
++            } else {
++                baseIndex_ = baseIndex;
++                otherIndex_ = otherIndex->clone(termStructureHandle_);
++                otherIndex_->unregisterWith(termStructureHandle_);
++            }
++
++            registerWith(baseIndex_);
++            registerWith(otherIndex_);
++            registerWith(discountHandle_);
++            registerWith(firstIborRate_);
++
++            earliestDate_ = startDate;
++
++            auto makeLeg = [&](const ext::shared_ptr<IborIndex>& index,
++                               const DayCounter& dc, bool singlePeriodRequired,
++                               const char* name) {
++                Schedule schedule = MakeSchedule().from(startDate).to(endDate)
++                    .withTenor(index->tenor())
++                    .withCalendar(calendar)
++                    .withConvention(convention)
++                    .endOfMonth(endOfMonth)
++                    .withRule(rule);
++                QL_REQUIRE(!singlePeriodRequired || schedule.size() == 2,
++                           "customPaymentDate and flat-rate payment are only supported "
++                           "for a single-period " << name << " leg spanning startDate to "
++                           "endDate; got a schedule with " << schedule.size() << " dates");
++                IborLeg builder = IborLeg(schedule, index)
++                    .withNotionals(100.0)
++                    .withPaymentLag(paymentLag)
++                    .withIndexedCoupons(useIndexedCoupons);
++                if (!dc.empty())
++                    builder.withPaymentDayCounter(dc);
++                return std::make_pair(schedule, Leg(builder));
++            };
++
++            bool early = customPaymentDate != Date();
++            auto [baseSchedule, baseLeg] =
++                makeLeg(baseIndex_, baseDayCounter, early || baseFlatRatePayment, "base");
++            auto [otherSchedule, otherLeg] =
++                makeLeg(otherIndex_, otherDayCounter, early || otherFlatRatePayment, "other");
++
++            auto lastBaseCoupon = ext::dynamic_pointer_cast<IborCoupon>(baseLeg.back());
++            auto lastOtherCoupon = ext::dynamic_pointer_cast<IborCoupon>(otherLeg.back());
++            QL_REQUIRE(lastBaseCoupon && lastOtherCoupon, "ibor legs without ibor coupons");
++
++            maturityDate_ = std::max(baseSchedule.endDate(), otherSchedule.endDate());
++            Date lastPaymentDate = std::max(baseLeg.back()->date(), otherLeg.back()->date());
++            latestRelevantDate_ = std::max({maturityDate_, lastPaymentDate,
++                                            lastBaseCoupon->fixingEndDate(),
++                                            lastOtherCoupon->fixingEndDate()});
++
++            // first coupon of the leg on the bootstrapped index at a given rate
++            if (!firstIborRate_.empty()) {
++                Leg& leg = bootstrapBaseCurve ? baseLeg : otherLeg;
++                auto first = ext::dynamic_pointer_cast<Coupon>(leg.front());
++                leg.front() = ext::make_shared<OverriddenRateCoupon>(first, firstIborRate_);
++            }
++
++            // flat payment, then early payment, on the (single) last cash flow
++            auto wrap = [&](Leg& leg, bool flat) {
++                ext::shared_ptr<Coupon> cf = ext::dynamic_pointer_cast<Coupon>(leg.back());
++                if (flat)
++                    cf = ext::make_shared<FlatRateCoupon>(cf);
++                if (early)
++                    cf = ext::make_shared<EarlyPaymentCoupon>(customPaymentDate, cf);
++                leg.back() = cf;
++            };
++            wrap(baseLeg, baseFlatRatePayment);
++            wrap(otherLeg, otherFlatRatePayment);
++
++            if (customPillarDate != Date())
++                pillarDate_ = customPillarDate;
++            else if (early)
++                pillarDate_ = customPaymentDate;
++            else
++                pillarDate_ = endDate;
++
++            // leg 0 (base + basis) paid, leg 1 (other) received
++            swap_ = ext::make_shared<Swap>(baseLeg, otherLeg);
++            swap_->setPricingEngine(
++                ext::make_shared<DiscountingSwapEngine>(discountRelinkableHandle_));
++        }
++
++        Real impliedQuote() const override {
++            swap_->deepUpdate();
++            Real bps;
++            if (baseFlatRatePayment_) {
++                // flat leg: d(amount)/d(spread) = nominal, discounted once at
++                // its payment date (Coupon::accrualPeriod() is not virtual,
++                // so Swap::legBPS() cannot be used); leg 0 is paid
++                Date payDate = swap_->leg(0).back()->date();
++                bps = -100.0 * discountRelinkableHandle_->discount(payDate) * 1.0e-4;
++            } else {
++                bps = swap_->legBPS(0);
++            }
++            return -(swap_->NPV() / bps) * 1.0e-4;
++        }
++
++        void accept(AcyclicVisitor& v) override {
++            auto* v1 = dynamic_cast<Visitor<IborIborBasisSwapRateHelperForwardStarting>*>(&v);
++            if (v1 != nullptr)
++                v1->visit(*this);
++            else
++                RateHelper::accept(v);
++        }
++
++        //! legs: 0 = base index (pays basis), 1 = other index
++        ext::shared_ptr<Swap> swap() const { return swap_; }
++
++      private:
++        void setTermStructure(YieldTermStructure* t) override {
++            bool observer = false;
++            ext::shared_ptr<YieldTermStructure> temp(t, null_deleter());
++            termStructureHandle_.linkTo(temp, observer);
++
++            if (discountHandle_.empty())
++                discountRelinkableHandle_.linkTo(temp, observer);
++            else
++                discountRelinkableHandle_.linkTo(*discountHandle_, observer);
++
++            RateHelper::setTermStructure(t);
++        }
++
++        ext::shared_ptr<IborIndex> baseIndex_, otherIndex_;
++        Handle<YieldTermStructure> discountHandle_;
++        bool baseFlatRatePayment_;
++        Handle<Quote> firstIborRate_;
 +
 +        ext::shared_ptr<Swap> swap_;
 +        RelinkableHandle<YieldTermStructure> termStructureHandle_;
